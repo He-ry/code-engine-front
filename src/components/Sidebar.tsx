@@ -16,6 +16,7 @@ import {
   User,
   PieChart,
   LogOut,
+  X,
 } from "lucide-react";
 
 const SplitPanelLeftIcon: React.FC<{ className?: string; isCollapsed?: boolean }> = ({
@@ -103,6 +104,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [projectSearch, setProjectSearch] = useState("");
   const [showSearchInput, setShowSearchInput] = useState(false);
   const [isProjectsSectionExpanded, setIsProjectsSectionExpanded] = useState(true);
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const [expandedProjects, setExpandedProjects] = useState<Record<string, boolean>>({
     [activeProjectId]: true,
   });
@@ -120,7 +122,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   );
 
   return (
-    <motion.div
+    <>
+      <motion.div
       initial={false}
       animate={{
         width: isOpen ? 224 : 0,
@@ -357,7 +360,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
               <div className="flex items-center gap-1 shrink-0">
                 <button
-                  onClick={logout}
+                  onClick={() => setShowLogoutConfirm(true)}
                   className="p-1 hover:bg-gray-200/60 dark:hover:bg-zinc-800 rounded text-gray-500 hover:text-rose-500 dark:text-zinc-400 dark:hover:text-rose-400 transition-colors cursor-pointer"
                   title={t("退出登录", "Sign Out")}
                 >
@@ -367,5 +370,47 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </div>
           </div>
         </motion.div>
+        <AnimatePresence>
+          {showLogoutConfirm && (
+            <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-md shadow-2xl max-w-sm w-full overflow-hidden"
+              >
+                <div className="p-5 space-y-3">
+                  <div className="flex items-center gap-2.5 text-gray-900 dark:text-zinc-100 font-bold text-sm">
+                    <LogOut className="w-4 h-4 shrink-0 text-gray-500 dark:text-zinc-400" />
+                    <span>{t("确认退出登录", "Confirm Sign Out")}</span>
+                  </div>
+                  <p className="text-xs text-gray-600 dark:text-zinc-300 leading-relaxed">
+                    {t("退出登录后需要重新验证身份才能继续使用。确定要退出吗？", "You will need to re-authenticate after signing out. Are you sure you want to continue?")}
+                  </p>
+                </div>
+                <div className="px-5 py-3 bg-gray-50 dark:bg-zinc-900/50 border-t border-gray-200 dark:border-zinc-800 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowLogoutConfirm(false)}
+                    className="px-3.5 py-1.5 rounded-md border border-gray-200 dark:border-zinc-800 text-xs font-medium text-gray-700 dark:text-zinc-300 hover:bg-gray-100 dark:hover:bg-zinc-800 cursor-pointer transition-colors"
+                  >
+                    {t("取消", "Cancel")}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowLogoutConfirm(false);
+                      logout();
+                    }}
+                    className="px-3.5 py-1.5 rounded-md bg-gray-900 dark:bg-zinc-100 text-white dark:text-zinc-900 font-medium text-xs hover:bg-gray-800 dark:hover:bg-zinc-200 transition-all cursor-pointer"
+                  >
+                    <span>{t("退出登录", "Sign Out")}</span>
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+    </>
       );
     };

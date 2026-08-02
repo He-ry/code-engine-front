@@ -1743,6 +1743,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
                   {/* Individual Model Cards Stack */}
                   <div className="space-y-2">
+                    <AnimatePresence mode="popLayout">
                     {(() => {
                       const defaultModels = [
                         {
@@ -1868,8 +1869,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         const isCustomModel = model.isCustom || model.isSystem === false;
 
                         return (
-                          <div
+                          <motion.div
                             key={model.id}
+                            initial={{ opacity: 0, y: -8, scale: 0.97 }}
+                            animate={{ opacity: 1, y: 0, scale: 1 }}
+                            exit={{ opacity: 0, y: -8, scale: 0.97 }}
+                            transition={{ type: "spring", stiffness: 400, damping: 30 }}
+                            layout
                             className="px-3.5 py-2.5 bg-[#f8f9fa] dark:bg-zinc-900/60 border border-gray-200/90 dark:border-zinc-800 rounded-md hover:border-gray-300 dark:hover:border-zinc-700 hover:bg-white dark:hover:bg-zinc-850 transition-all space-y-1 shadow-2xs"
                           >
                             <div className="flex items-center justify-between">
@@ -1965,10 +1971,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                                 {model.desc}
                               </p>
                             )}
-                          </div>
+                          </motion.div>
                         );
                       });
                     })()}
+                    </AnimatePresence>
                   </div>
                 </div>
               )}

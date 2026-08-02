@@ -387,28 +387,36 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           }
         });
 
-        setEnabledModels(prev => {
-          const combined = { ...prev, ...nextEnabledModels };
-          localStorage.setItem("app_enabled_models", JSON.stringify(combined));
-          return combined;
-        });
-        
-        if (nextCustomProviders.length > 0) {
-          setCustomProviders(nextCustomProviders);
-          localStorage.setItem("app_custom_providers", JSON.stringify(nextCustomProviders));
-        }
+        // Replace enabledModels entirely with fresh data from backend
+        // (previously used spread merge which never removed stale entries of deleted models)
+        setEnabledModels(nextEnabledModels);
+        localStorage.setItem("app_enabled_models", JSON.stringify(nextEnabledModels));
 
-        if (nextBackendModels.length > 0) {
-          setBackendModels(nextBackendModels);
-        }
+        // Always update customProviders, even if empty (e.g. last custom model was deleted)
+        setCustomProviders(nextCustomProviders);
+        localStorage.setItem("app_custom_providers", JSON.stringify(nextCustomProviders));
+
+        // Always update backendModels, even if empty
+        setBackendModels(nextBackendModels);
+      } else {
+        // Backend returned empty list — clear all model-related state
+        setEnabledModels({});
+        localStorage.setItem("app_enabled_models", JSON.stringify({}));
+        setCustomProviders([]);
+        localStorage.setItem("app_custom_providers", JSON.stringify([]));
+        setBackendModels([]);
       }
     } catch (err) {
       console.warn("Failed to load models from backend:", err);
     }
   };
 
+  // Only fetch backend models when user is logged in with a valid token
+  // (prevents premature API calls to agent.hery.cloud on homepage load)
   useEffect(() => {
-    fetchBackendModels();
+    if (isLoggedIn && user?.token) {
+      fetchBackendModels();
+    }
   }, [user?.token, user?.email, isLoggedIn, backendApiUrl]);
 
   const refreshModels = async () => {
