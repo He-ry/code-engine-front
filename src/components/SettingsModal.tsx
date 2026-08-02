@@ -26,7 +26,6 @@ import {
   PieChart,
   TrendingUp,
   Activity,
-  Zap,
   Calendar,
   Sparkles,
   CreditCard,
@@ -439,6 +438,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setBackendApiUrl,
     user,
     refreshModels,
+    testModelConnection,
   } = useSettings();
 
   const { showSuccess, showError, showInfo } = useToast();
@@ -458,6 +458,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [customModelId, setCustomModelId] = useState("");
   const [customProto, setCustomProto] = useState<"openai" | "anthropic" | "gemini">("openai");
   const [customError, setCustomError] = useState("");
+
+  // Connectivity Test States
+  const [isTestingModalConn, setIsTestingModalConn] = useState(false);
+  const [modalConnResult, setModalConnResult] = useState<{ success: boolean; message: string; latency_ms?: number } | null>(null);
+  const [testingModelIdMap, setTestingModelIdMap] = useState<Record<string, boolean>>({});
+  const [modelTestResults, setModelTestResults] = useState<Record<string, { success: boolean; message: string; latency_ms?: number }>>({});
 
   const [isProtocolOpen, setIsProtocolOpen] = useState(false);
   const [isLangOpen, setIsLangOpen] = useState(false);
@@ -502,6 +508,79 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       setIsRefreshing(false);
       showSuccess(t("已成功同步后端模型列表", "Models refreshed"), t("已为您拉取最新的可供使用的模型服务", "Fetched latest models list from server"));
     }, 600);
+  };
+
+  const handleTestModalConnection = async () => {
+    setCustomError("");
+    if (!customBaseUrl.trim() || !customModelId.trim()) {
+      const errMsg = t("请至少填写 Base URL 与模型标识符", "Please fill in Base URL and Model ID");
+      setModalConnResult({ success: false, message: errMsg });
+      return;
+    }
+    setIsTestingModalConn(true);
+    setModalConnResult(null);
+    try {
+      const res = await testModelConnection({
+        provider: customName.trim() || "Custom",
+        protocol: customProto,
+        base_url: customBaseUrl.trim(),
+        api_key: customApiKey.trim(),
+        model: customModelId.trim(),
+      });
+      setModalConnResult(res);
+      if (res.success) {
+        showSuccess(
+          t("连通性测试成功", "Connection Test Passed"),
+          res.message + (res.latency_ms ? ` (${Math.round(res.latency_ms)}ms)` : "")
+        );
+      } else {
+        showError(t("连通性测试失败", "Connection Test Failed"), res.message);
+      }
+    } catch (err: any) {
+      const errMsg = err.message || t("测试异常", "Test Exception");
+      setModalConnResult({ success: false, message: errMsg });
+      showError(t("连通性测试失败", "Connection Test Failed"), errMsg);
+    } finally {
+      setIsTestingModalConn(false);
+    }
+  };
+
+  const handleTestModelItem = async (model: any) => {
+    const modelId = model.id;
+    const cp = (customProviders || []).find((p) => p.modelName === model.id || p.id === model.id) ||
+               (backendModels || []).find((bm) => bm.id === model.id);
+
+    const providerName = cp?.name || cp?.provider || model.provider || "System";
+    const baseUrlVal = cp?.baseUrl || model.baseUrl || "https://api.openai.com/v1";
+    const apiKeyVal = cp?.apiKey && cp.apiKey !== "••••••••" ? cp.apiKey : "";
+    const modelCodeVal = cp?.modelName || model.modelName || model.id;
+    const protocolVal = cp?.protocol || model.protocol || "openai";
+
+    setTestingModelIdMap((prev) => ({ ...prev, [modelId]: true }));
+    try {
+      const res = await testModelConnection({
+        provider: providerName,
+        protocol: protocolVal,
+        base_url: baseUrlVal,
+        api_key: apiKeyVal,
+        model: modelCodeVal,
+      });
+      setModelTestResults((prev) => ({ ...prev, [modelId]: res }));
+      if (res.success) {
+        showSuccess(
+          t("连通性测试成功", "Test Success"),
+          `${model.name}: ${res.message}${res.latency_ms ? ` (${Math.round(res.latency_ms)}ms)` : ""}`
+        );
+      } else {
+        showError(t("连通性测试失败", "Test Failed"), `${model.name}: ${res.message}`);
+      }
+    } catch (err: any) {
+      const errMsg = err.message || t("测试失败", "Test failed");
+      setModelTestResults((prev) => ({ ...prev, [modelId]: { success: false, message: errMsg } }));
+      showError(t("连通性测试失败", "Test Failed"), `${model.name}: ${errMsg}`);
+    } finally {
+      setTestingModelIdMap((prev) => ({ ...prev, [modelId]: false }));
+    }
   };
 
   const handleSaveCustomProvider = async () => {
@@ -1903,9 +1982,39 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                                 {model.hasImage && (
                                   <ImageIcon className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 stroke-[1.6]" />
                                 )}
+                                {modelTestResults[model.id] && (
+                                  <span
+                                    className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.2 rounded border transition-all ${
+                                      modelTestResults[model.id].success
+                                        ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 border-emerald-200/80 dark:border-emerald-800/80"
+                                        : "bg-red-50 text-red-700 dark:bg-red-950/60 dark:text-red-300 border-red-200/80 dark:border-red-800/80"
+                                    }`}
+                                    title={modelTestResults[model.id].message}
+                                  >
+                                    <span className={`w-1.5 h-1.5 rounded-full ${modelTestResults[model.id].success ? "bg-emerald-500" : "bg-red-500"}`} />
+                                    {modelTestResults[model.id].success
+                                      ? `${modelTestResults[model.id].latency_ms ? `${Math.round(modelTestResults[model.id].latency_ms!)}ms` : t("正常", "OK")}`
+                                      : t("失败", "Failed")}
+                                  </span>
+                                )}
                               </div>
 
                               <div className="flex items-center gap-1.5">
+                                {/* Connectivity Test Button */}
+                                <button
+                                  type="button"
+                                  onClick={() => handleTestModelItem(model)}
+                                  disabled={testingModelIdMap[model.id]}
+                                  className="px-2 py-0.5 text-xs text-gray-600 dark:text-zinc-400 hover:text-gray-900 dark:hover:text-zinc-100 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded border border-gray-200 dark:border-zinc-700 flex items-center gap-1 transition-colors cursor-pointer shrink-0 disabled:opacity-50"
+                                  title={t("测试此模型的 API 连通性", "Test API connectivity for this model")}
+                                >
+                                  {testingModelIdMap[model.id] ? (
+                                    <div className="w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />
+                                  ) : (
+                                    <Activity className="w-3 h-3 text-gray-500 dark:text-zinc-400" />
+                                  )}
+                                  <span className="hidden sm:inline text-[11px]">{t("测试", "Test")}</span>
+                                </button>
                                 {/* Edit Model Button (ONLY for Custom Models) */}
                                 {isCustomModel && (
                                   <button
@@ -2144,6 +2253,27 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
               )}
 
+              {modalConnResult && (
+                <div
+                  className={`p-2.5 rounded-md text-xs border font-medium flex items-start gap-2 ${
+                    modalConnResult.success
+                      ? "bg-emerald-50 text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-200 border-emerald-200 dark:border-emerald-800"
+                      : "bg-red-50 text-red-800 dark:bg-red-950/50 dark:text-red-200 border-red-200 dark:border-red-800"
+                  }`}
+                >
+                  <Activity className={`w-4 h-4 shrink-0 mt-0.5 ${modalConnResult.success ? "text-emerald-500" : "text-red-500"}`} />
+                  <div className="space-y-0.5">
+                    <div className="font-semibold text-xs flex items-center gap-2">
+                      <span>{modalConnResult.success ? t("连通测试通过", "Connection Test Passed") : t("连通测试失败", "Connection Test Failed")}</span>
+                      {modalConnResult.latency_ms !== undefined && (
+                        <span className="text-[10px] opacity-80 font-mono">({Math.round(modalConnResult.latency_ms)}ms)</span>
+                      )}
+                    </div>
+                    <div className="text-[11px] leading-relaxed opacity-90">{modalConnResult.message}</div>
+                  </div>
+                </div>
+              )}
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                 <div className="space-y-1 col-span-1 sm:col-span-2 relative">
                   <label className="block text-[11px] font-medium text-gray-600 dark:text-zinc-400">{t("协议类型", "Protocol Type")}</label>
@@ -2243,21 +2373,37 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </div>
             </div>
 
-            <div className="px-4 py-2.5 bg-gray-50 dark:bg-zinc-900/50 border-t border-gray-100 dark:border-zinc-800 flex justify-end gap-2 rounded-b-md">
+            <div className="px-4 py-2.5 bg-gray-50 dark:bg-zinc-900/50 border-t border-gray-100 dark:border-zinc-800 flex items-center justify-between gap-2 rounded-b-md">
               <button
                 type="button"
-                onClick={() => setIsAddCustomModalOpen(false)}
-                className="px-3 py-1 rounded-md border border-gray-200 dark:border-zinc-800 text-xs font-medium text-gray-700 dark:text-zinc-300 hover:bg-gray-100 dark:hover:bg-zinc-800 cursor-pointer"
+                onClick={handleTestModalConnection}
+                disabled={isTestingModalConn}
+                className="px-2.5 py-1.5 rounded-md border border-gray-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-medium text-gray-700 dark:text-zinc-200 hover:bg-gray-100 dark:hover:bg-zinc-700 transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50 shadow-2xs"
               >
-                {t("取消", "Cancel")}
+                {isTestingModalConn ? (
+                  <div className="w-3.5 h-3.5 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  <Activity className="w-3.5 h-3.5 text-gray-600 dark:text-zinc-400" />
+                )}
+                <span>{isTestingModalConn ? t("正在测试...", "Testing...") : t("测试连通性", "Test Connection")}</span>
               </button>
-              <button
-                type="button"
-                onClick={handleSaveCustomProvider}
-                className="px-3.5 py-1 bg-gray-900 dark:bg-zinc-100 text-white dark:text-zinc-900 font-medium text-xs hover:bg-gray-800 dark:hover:bg-zinc-200 transition-all rounded-md shadow-2xs cursor-pointer"
-              >
-                {editingModelId ? t("更新供应商", "Update Provider") : t("保存供应商", "Save Provider")}
-              </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsAddCustomModalOpen(false)}
+                  className="px-3 py-1 rounded-md border border-gray-200 dark:border-zinc-800 text-xs font-medium text-gray-700 dark:text-zinc-300 hover:bg-gray-100 dark:hover:bg-zinc-800 cursor-pointer"
+                >
+                  {t("取消", "Cancel")}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveCustomProvider}
+                  className="px-3.5 py-1 bg-gray-900 dark:bg-zinc-100 text-white dark:text-zinc-900 font-medium text-xs hover:bg-gray-800 dark:hover:bg-zinc-200 transition-all rounded-md shadow-2xs cursor-pointer"
+                >
+                  {editingModelId ? t("更新供应商", "Update Provider") : t("保存供应商", "Save Provider")}
+                </button>
+              </div>
             </div>
           </motion.div>
         </div>

@@ -37,6 +37,20 @@ export interface UserProfile {
   refreshToken?: string;
 }
 
+export interface TestConnectionParams {
+  provider: string;
+  protocol?: string;
+  base_url: string;
+  api_key?: string;
+  model: string;
+}
+
+export interface TestConnectionResult {
+  success: boolean;
+  message: string;
+  latency_ms?: number;
+}
+
 interface SettingsContextType {
   language: Language;
   setLanguage: (lang: Language) => void;
@@ -74,6 +88,7 @@ interface SettingsContextType {
   backendApiUrl: string;
   setBackendApiUrl: (url: string) => void;
   refreshModels: () => Promise<void>;
+  testModelConnection: (params: TestConnectionParams) => Promise<TestConnectionResult>;
 }
 
 const SettingsContext = createContext<SettingsContextType | undefined>(undefined);
@@ -485,6 +500,64 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     });
   };
 
+  const testModelConnection = async (params: TestConnectionParams): Promise<TestConnectionResult> => {
+    const baseUrl = backendApiUrl || localStorage.getItem("app_backend_api_url") || "https://agent.hery.cloud";
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (user?.token) {
+      headers["Authorization"] = `Bearer ${user.token}`;
+    }
+
+    try {
+      const res = await apiFetch(`${baseUrl}/api/models/test-connection`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          provider: params.provider || "Custom",
+          protocol: params.protocol || "openai",
+          base_url: params.base_url,
+          api_key: params.api_key || "",
+          model: params.model,
+        }),
+      });
+
+      if (!res.ok) {
+        let errMsg = "";
+        try {
+          const errJson = await res.json();
+          errMsg = errJson.detail || errJson.message || "";
+        } catch (_) {
+          errMsg = await res.text();
+        }
+        return {
+          success: false,
+          message: errMsg || t("连接测试请求失败", "Connection test request failed"),
+        };
+      }
+
+      const json = await res.json();
+      if (json && json.data) {
+        return {
+          success: !!json.data.success,
+          message: json.data.message || (json.data.success ? t("连接正常", "Connection successful") : t("连接失败", "Connection failed")),
+          latency_ms: json.data.latency_ms,
+        };
+      }
+
+      return {
+        success: json.code === 200 || json.success === true,
+        message: json.message || t("测试完成", "Test completed"),
+        latency_ms: json.latency_ms,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        message: err.message || t("网络错误，无法连接到测试服务", "Network error, failed to reach server"),
+      };
+    }
+  };
+
   const addCustomProvider = async (p: Omit<CustomProvider, "id">) => {
     if (user?.token) {
       const baseUrl = backendApiUrl || localStorage.getItem("app_backend_api_url") || "https://agent.hery.cloud";
@@ -832,6 +905,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         backendApiUrl,
         setBackendApiUrl,
         refreshModels,
+        testModelConnection,
       }}
     >
       {children}
