@@ -1,0 +1,6 @@
+{
+  "name": "CodeX AI Studio - Blackbox Engine",
+  "description": "A 1:1 replica of CodeX / Blackbox Engine AI Coding IDE with real-time prompt completion, context selection, file explorer, integrated terminal, and browser preview.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
