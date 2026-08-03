@@ -222,7 +222,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({
   };
 
   return (
-    <div className="w-full max-w-5xl mx-auto relative font-sans">
+    <div className="w-full max-w-3xl mx-auto relative font-sans">
       {/* Main Container Card */}
       <div className="bg-white dark:bg-zinc-900 rounded-2xl border border-gray-200 dark:border-zinc-800 shadow-md hover:shadow-lg transition-shadow duration-200 overflow-visible relative flex flex-col p-0">
         {/* Input & Pills Container (Integrated inside the input box, vertically stacked) */}

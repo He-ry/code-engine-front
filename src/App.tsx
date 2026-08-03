@@ -432,7 +432,7 @@ export default function App() {
   const resolveModelId = (modelName: string): string => {
     const models = backendModels;
     if (!models.length) return "";
-    const candidates = [defaultModel, modelName];
+    const candidates = [modelName, defaultModel];
     for (const cand of candidates) {
       if (!cand || cand === "Auto") continue;
       const hit = models.find((m) => m.name === cand || m.modelName === cand);

@@ -545,9 +545,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     const cp = (customProviders || []).find((p) => p.modelName === model.id || p.id === model.id) ||
                (backendModels || []).find((bm) => bm.id === model.id);
 
-    const providerName = cp?.name || cp?.provider || model.provider || "System";
+    const providerName = (cp && "provider" in cp ? (cp as any).provider : cp?.name) || model.provider || "System";
     const baseUrlVal = cp?.baseUrl || model.baseUrl || "https://api.openai.com/v1";
-    const apiKeyVal = cp?.apiKey && cp.apiKey !== "••••••••" ? cp.apiKey : "";
+    const apiKeyVal = (cp && "apiKey" in cp && (cp as any).apiKey && (cp as any).apiKey !== "••••••••") ? (cp as any).apiKey : "";
     const modelCodeVal = cp?.modelName || model.modelName || model.id;
     const protocolVal = cp?.protocol || model.protocol || "openai";
 
@@ -1367,39 +1367,34 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-100 dark:divide-zinc-700/60 font-mono text-[11px]">
-                          <tr>
-                            <td className="py-2.5 px-1 font-sans font-medium text-gray-900 dark:text-zinc-100">
-                              gemini-2.5-flash
-                            </td>
-                            <td className="py-2.5 px-1 text-right text-gray-600 dark:text-zinc-400">620,100</td>
-                            <td className="py-2.5 px-1 text-right text-gray-600 dark:text-zinc-400">200,000</td>
-                            <td className="py-2.5 px-1 text-right text-gray-600 dark:text-zinc-400">2,150</td>
-                            <td className="py-2.5 px-1 text-right font-semibold text-gray-900 dark:text-zinc-100">
-                              63.8%
-                            </td>
-                          </tr>
-                          <tr>
-                            <td className="py-2.5 px-1 font-sans font-medium text-gray-900 dark:text-zinc-100">
-                              gemini-2.5-pro
-                            </td>
-                            <td className="py-2.5 px-1 text-right text-gray-600 dark:text-zinc-400">210,400</td>
-                            <td className="py-2.5 px-1 text-right text-gray-600 dark:text-zinc-400">102,000</td>
-                            <td className="py-2.5 px-1 text-right text-gray-600 dark:text-zinc-400">840</td>
-                            <td className="py-2.5 px-1 text-right font-semibold text-gray-900 dark:text-zinc-100">
-                              24.3%
-                            </td>
-                          </tr>
-                          <tr>
-                            <td className="py-2.5 px-1 font-sans font-medium text-gray-900 dark:text-zinc-100">
-                              claude-3-5-sonnet
-                            </td>
-                            <td className="py-2.5 px-1 text-right text-gray-600 dark:text-zinc-400">110,000</td>
-                            <td className="py-2.5 px-1 text-right text-gray-600 dark:text-zinc-400">42,000</td>
-                            <td className="py-2.5 px-1 text-right text-gray-600 dark:text-zinc-400">430</td>
-                            <td className="py-2.5 px-1 text-right font-semibold text-gray-900 dark:text-zinc-100">
-                              11.9%
-                            </td>
-                          </tr>
+                          {(() => {
+                            const modelsToDisplay = (backendModels && backendModels.length > 0)
+                              ? backendModels.map(m => m.id || m.name)
+                              : ["glm-4-7", "glm-5-turbo", "deepseek-v4-pro"];
+
+                            const usageStats = [
+                              { inputTokens: "620,100", outputTokens: "200,000", reqs: "2,150", ratio: "63.8%" },
+                              { inputTokens: "210,400", outputTokens: "102,000", reqs: "840", ratio: "24.3%" },
+                              { inputTokens: "110,000", outputTokens: "42,000", reqs: "430", ratio: "11.9%" },
+                            ];
+
+                            return modelsToDisplay.slice(0, 3).map((mId, idx) => {
+                              const stat = usageStats[idx] || usageStats[0];
+                              return (
+                                <tr key={mId}>
+                                  <td className="py-2.5 px-1 font-sans font-medium text-gray-900 dark:text-zinc-100">
+                                    {mId}
+                                  </td>
+                                  <td className="py-2.5 px-1 text-right text-gray-600 dark:text-zinc-400">{stat.inputTokens}</td>
+                                  <td className="py-2.5 px-1 text-right text-gray-600 dark:text-zinc-400">{stat.outputTokens}</td>
+                                  <td className="py-2.5 px-1 text-right text-gray-600 dark:text-zinc-400">{stat.reqs}</td>
+                                  <td className="py-2.5 px-1 text-right font-semibold text-gray-900 dark:text-zinc-100">
+                                    {stat.ratio}
+                                  </td>
+                                </tr>
+                              );
+                            });
+                          })()}
                         </tbody>
                       </table>
                     </div>
@@ -1817,90 +1812,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   <div className="space-y-2">
                     <AnimatePresence mode="popLayout">
                     {(() => {
-                      const defaultModels = [
-                        {
-                          id: "deepseek-v4-flash",
-                          name: "Deepseek V4 Flash",
-                          hasLink: true,
-                          hasImage: false,
-                          desc: t("DeepSeek最新极速模型，适合做代码检索等分析类任务。", "DeepSeek's latest ultra-fast model, ideal for code search and analysis tasks."),
-                        },
-                        {
-                          id: "deepseek-v4-pro",
-                          name: "Deepseek V4 Pro",
-                          hasLink: true,
-                          hasImage: false,
-                          desc: t("DeepSeek最新旗舰模型，有超强的系统设计、任务规划和编码能力。", "DeepSeek's flagship model with superior system design, task planning, and coding capabilities."),
-                        },
-                        {
-                          id: "glm-4-7",
-                          name: "GLM-4.7",
-                          hasLink: true,
-                          hasImage: false,
-                          desc: t("适用于复杂推理、代码理解等场景，能力均衡", "Suitable for complex reasoning and code understanding with balanced performance."),
-                        },
-                        {
-                          id: "glm-5-turbo",
-                          name: "GLM-5-Turbo",
-                          hasLink: true,
-                          hasImage: false,
-                          desc: t("对复杂、长链路指令具备更强的理解能力，提升了大量Skills下精准识别所需技能的准确度", "Enhanced comprehension for complex, multi-step instructions, improving Skill recognition accuracy."),
-                        },
-                        {
-                          id: "glm-5-0",
-                          name: "GLM-5.0",
-                          hasLink: true,
-                          hasImage: false,
-                          desc: t("适用于更高复杂度推理、复杂代码理解（Thinking）", "Suitable for higher complexity reasoning and deep code comprehension (Thinking)."),
-                        },
-                        {
-                          id: "glm-5-1",
-                          name: "GLM-5.1",
-                          hasLink: true,
-                          hasImage: false,
-                          desc: t("GLM最新旗舰模型，适用于复杂编码任务（Thinking）", "GLM flagship model tailored for complex coding tasks (Thinking)."),
-                        },
-                        {
-                          id: "glm-5-2",
-                          name: "GLM-5.2",
-                          hasLink: true,
-                          hasImage: false,
-                          desc: t("GLM最新旗舰模型，百万级上下文理解，擅长复杂编码与长程推理任务", "GLM flagship model with 1M context, excelling in complex coding and long-horizon reasoning."),
-                        },
-                        {
-                          id: "glm-5v-turbo",
-                          name: "GLM-5v-Turbo",
-                          hasLink: true,
-                          hasImage: true,
-                          desc: t("多模态模型，适用于代码编写场景，能力均衡（Thinking）", "Multimodal model for code generation and vision understanding (Thinking)."),
-                        },
-                        {
-                          id: "kimi-k2-5",
-                          name: "Kimi-K2.5",
-                          hasLink: true,
-                          hasImage: true,
-                          desc: t("支持长上下文与多模态极速处理，擅长精准逻辑重构与信息提取", "Supports long context and multimodal fast processing, specializing in precise logic refactoring."),
-                        },
-                      ];
-
                       const savedDeleted = localStorage.getItem("app_deleted_models");
                       let deletedSet = new Set<string>();
                       if (savedDeleted) {
                         try { deletedSet = new Set(JSON.parse(savedDeleted)); } catch (_) {}
                       }
 
-                      const baseList = (backendModels && backendModels.length > 0)
-                        ? backendModels.map(bm => ({
-                            id: bm.id,
-                            name: bm.name,
-                            hasLink: true,
-                            hasImage: !!bm.hasImage,
-                            desc: bm.description || `${bm.provider || "System"} AI Model (${bm.protocol || "openai"})`,
-                            provider: bm.provider,
-                            isSystem: bm.isSystem === true,
-                            isCustom: bm.isSystem === false,
-                          }))
-                        : defaultModels.map(dm => ({ ...dm, isSystem: true, isCustom: false }));
+                      const baseList = (backendModels || []).map(bm => ({
+                        id: bm.id,
+                        name: bm.name,
+                        hasLink: true,
+                        hasImage: !!bm.hasImage,
+                        desc: bm.description || `${bm.provider || "System"} AI Model (${bm.protocol || "openai"})`,
+                        provider: bm.provider,
+                        isSystem: bm.isSystem === true,
+                        isCustom: bm.isSystem === false,
+                      }));
 
                       // Merge local customProviders if not already in baseList
                       const existingIds = new Set(baseList.map(m => m.id));
@@ -1919,13 +1846,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
                       const rawList = [...baseList, ...extraCustomList];
 
-                      // Render all backend models directly when returned, deduplicated by ID
-                      const initialList = (backendModels && backendModels.length > 0)
-                        ? rawList
-                        : rawList.filter(m => {
-                            if (m.isSystem) return true;
-                            return !deletedSet.has(m.id);
-                          });
+                      const initialList = rawList.filter(m => !deletedSet.has(m.id));
 
                       const seenKeys = new Set<string>();
                       const listToRender = initialList.filter(m => {
@@ -1934,6 +1855,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         seenKeys.add(key);
                         return true;
                       });
+
+                      if (listToRender.length === 0) {
+                        return (
+                          <div className="py-12 text-center text-xs text-gray-500 dark:text-zinc-400 font-sans">
+                            {t("暂无模型列表，点击右上角同步按钮获取，或添加自定义模型", "No models found. Click Refresh above or add a custom model.")}
+                          </div>
+                        );
+                      }
 
                       return listToRender.map((model: any) => {
                         const isEnabled = enabledModels[model.id] !== false;
@@ -2001,9 +1930,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                                       const cp = (customProviders || []).find((p) => p.modelName === model.id || p.id === model.id) ||
                                                  (backendModels || []).find((bm) => bm.id === model.id);
                                       setEditingModelId(model.id);
-                                      setCustomName(cp?.name || cp?.provider || model.provider || "");
+                                      setCustomName(cp?.name || (cp && "provider" in cp ? (cp as any).provider : "") || model.provider || "");
                                       setCustomBaseUrl(cp?.baseUrl || model.baseUrl || "");
-                                      setCustomApiKey(cp?.apiKey && cp.apiKey !== "••••••••" ? cp.apiKey : "");
+                                      setCustomApiKey(cp && "apiKey" in cp && (cp as any).apiKey && (cp as any).apiKey !== "••••••••" ? (cp as any).apiKey : "");
                                       setCustomModelId(cp?.modelName || model.id || "");
                                       setCustomProto((cp?.protocol || model.protocol || "openai") as any);
                                       setCustomError("");

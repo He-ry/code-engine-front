@@ -243,7 +243,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   });
 
   const [defaultModel, setDefaultModelState] = useState<string>(() => {
-    return localStorage.getItem("app_default_model") || "gemini-2.5-flash";
+    return localStorage.getItem("app_default_model") || "glm-4-7";
   });
 
   const [apiKey, setApiKeyState] = useState<string>(() => {
@@ -466,12 +466,9 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   };
 
-  // Only fetch backend models when user is logged in with a valid token
-  // (prevents premature API calls to agent.hery.cloud on homepage load)
+  // Fetch backend models when component mounts or token/url updates
   useEffect(() => {
-    if (isLoggedIn && user?.token) {
-      fetchBackendModels();
-    }
+    fetchBackendModels();
   }, [user?.token, user?.email, isLoggedIn, backendApiUrl]);
 
   const refreshModels = async () => {

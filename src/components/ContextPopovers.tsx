@@ -312,18 +312,27 @@ interface ModelMenuProps {
 export const ModelMenu: React.FC<ModelMenuProps> = ({ currentModel, onSelectModel, onClose }) => {
   const { backendModels, customProviders, enabledModels, t } = useSettings();
 
+  const autoOption = {
+    id: "auto",
+    name: "Auto",
+    displayName: t("Auto", "Auto"),
+    provider: t("智能模型选择", "Smart Engine Selection"),
+    isCustom: false,
+  };
+
   const baseList = (backendModels && backendModels.length > 0)
     ? backendModels
         .filter(m => enabledModels[m.id] !== false)
         .map(bm => ({
           id: bm.id,
           name: bm.name,
+          displayName: bm.name,
           provider: bm.isSystem === true ? t("系统模型", "System") : t("自定义", "Custom"),
           isCustom: bm.isSystem === false,
         }))
     : MODEL_OPTIONS
         .filter(m => enabledModels[m.name] !== false)
-        .map((m) => ({ id: m.id, name: m.name, provider: t(m.provider, m.enProvider), isCustom: false }));
+        .map((m) => ({ id: m.id, name: m.name, displayName: m.name, provider: t(m.provider, m.enProvider), isCustom: false }));
 
   const existingNames = new Set(baseList.map(m => m.name));
   const customList = (customProviders || [])
@@ -331,11 +340,13 @@ export const ModelMenu: React.FC<ModelMenuProps> = ({ currentModel, onSelectMode
     .map(p => ({
       id: `custom-${p.id}`,
       name: p.modelName || p.name,
+      displayName: p.modelName || p.name,
       provider: `${t("自定义", "Custom")} (${p.name})`,
       isCustom: true,
     }));
 
-  const allModels = [...baseList, ...customList];
+  const hasAuto = baseList.some(m => m.name === "Auto" || m.id === "auto");
+  const allModels = hasAuto ? [...baseList, ...customList] : [autoOption, ...baseList, ...customList];
 
   return (
     <motion.div
@@ -360,7 +371,7 @@ export const ModelMenu: React.FC<ModelMenuProps> = ({ currentModel, onSelectMode
             className="w-full px-3 py-2 flex items-center justify-between hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors text-left cursor-pointer"
           >
             <div>
-              <div className="font-medium text-gray-900 dark:text-gray-100">{m.name}</div>
+              <div className="font-medium text-gray-900 dark:text-gray-100">{m.displayName || m.name}</div>
               <div className="text-[10px] text-gray-400">{m.provider}</div>
             </div>
             {isSelected && <Check className="w-3.5 h-3.5 text-gray-800 dark:text-gray-200" />}

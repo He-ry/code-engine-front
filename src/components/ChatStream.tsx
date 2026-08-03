@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
+import Markdown from "react-markdown";
 import { useSettings } from "../context/SettingsContext";
 import { ChatMessage } from "../types";
 import { CodeBlock } from "./CodeBlock";
@@ -126,7 +127,7 @@ export const ChatStream: React.FC<ChatStreamProps> = ({ messages, isGenerating, 
   };
 
   return (
-    <div ref={containerRef} className="flex-1 overflow-y-auto no-scrollbar px-6 py-8 space-y-7 max-w-5xl mx-auto w-full font-sans select-text">
+    <div ref={containerRef} className="flex-1 overflow-y-auto no-scrollbar px-6 py-8 space-y-7 max-w-3xl mx-auto w-full font-sans select-text">
       {messages.map((msg) => {
         const isUser = msg.sender === "user";
         const isLiked = likedMessages[msg.id];
@@ -215,108 +216,82 @@ export const ChatStream: React.FC<ChatStreamProps> = ({ messages, isGenerating, 
 
             {/* 3. Main AI Text Content */}
             <div className="text-sm leading-relaxed text-gray-800 dark:text-zinc-200 max-w-full font-sans space-y-1">
-              {(() => {
-                const text = msg.text;
-                if (!text.includes("```")) {
-                  return text.split("\n").map((line, lineIdx) => {
-                    if (line.startsWith("### ")) {
+              <Markdown
+                components={{
+                  code(props: any) {
+                    const { node, className, children, ...rest } = props;
+                    const match = /language-(\w+)/.exec(className || "");
+                    const codeString = String(children).replace(/\n$/, "");
+                    const isBlock = Boolean(match) || codeString.includes("\n");
+
+                    if (isBlock) {
                       return (
-                        <h3 key={lineIdx} className="text-sm font-bold text-gray-900 dark:text-zinc-100 mt-2 mb-1">
-                          {line.replace("### ", "")}
-                        </h3>
+                        <CodeBlock
+                          code={codeString}
+                          language={match ? match[1] : ""}
+                        />
                       );
                     }
-                    const parts = line.split(/(\*\*.*?\*\*|`.*?`)/g);
-                    const isBullet = line.trim().startsWith("- ") || /^\d+\.\s/.test(line.trim());
+
                     return (
-                      <div key={lineIdx} className={`${isBullet ? "pl-2" : ""}`}>
-                        {parts.map((part, pIdx) => {
-                          if (part.startsWith("**") && part.endsWith("**")) {
-                            return (
-                              <strong key={pIdx} className="font-semibold text-gray-900 dark:text-zinc-100">
-                                {part.slice(2, -2)}
-                              </strong>
-                            );
-                          }
-                          if (part.startsWith("`") && part.endsWith("`")) {
-                            return (
-                              <code
-                                key={pIdx}
-                                className="px-1.5 py-0.5 bg-gray-100 dark:bg-zinc-800 text-rose-600 dark:text-rose-400 rounded text-xs font-mono"
-                              >
-                                {part.slice(1, -1)}
-                              </code>
-                            );
-                          }
-                          return part;
-                        })}
-                      </div>
+                      <code
+                        className="px-1.5 py-0.5 bg-gray-200/80 dark:bg-zinc-800 text-purple-700 dark:text-purple-300 rounded text-xs font-mono mx-0.5"
+                        {...rest}
+                      >
+                        {children}
+                      </code>
                     );
-                  });
-                }
-
-                // Parse ``` code blocks in text
-                const segments: Array<{ type: "text" | "code"; content: string; lang?: string }> = [];
-                const regex = /```(\w*)\n([\s\S]*?)```/g;
-                let lastIndex = 0;
-                let match;
-
-                while ((match = regex.exec(text)) !== null) {
-                  if (match.index > lastIndex) {
-                    segments.push({ type: "text", content: text.slice(lastIndex, match.index) });
-                  }
-                  segments.push({ type: "code", lang: match[1] || "javascript", content: match[2].trim() });
-                  lastIndex = regex.lastIndex;
-                }
-                if (lastIndex < text.length) {
-                  segments.push({ type: "text", content: text.slice(lastIndex) });
-                }
-
-                return segments.map((seg, idx) => {
-                  if (seg.type === "code") {
-                    return <CodeBlock key={idx} code={seg.content} language={seg.lang} />;
-                  }
-                  return (
-                    <div key={idx} className="space-y-1">
-                      {seg.content.split("\n").map((line, lineIdx) => {
-                        if (line.startsWith("### ")) {
-                          return (
-                            <h3 key={lineIdx} className="text-sm font-bold text-gray-900 dark:text-zinc-100 mt-2 mb-1">
-                              {line.replace("### ", "")}
-                            </h3>
-                          );
-                        }
-                        const parts = line.split(/(\*\*.*?\*\*|`.*?`)/g);
-                        const isBullet = line.trim().startsWith("- ") || /^\d+\.\s/.test(line.trim());
-                        return (
-                          <div key={lineIdx} className={`${isBullet ? "pl-2" : ""}`}>
-                            {parts.map((part, pIdx) => {
-                              if (part.startsWith("**") && part.endsWith("**")) {
-                                return (
-                                  <strong key={pIdx} className="font-semibold text-gray-900 dark:text-zinc-100">
-                                    {part.slice(2, -2)}
-                                  </strong>
-                                );
-                              }
-                              if (part.startsWith("`") && part.endsWith("`")) {
-                                return (
-                                  <code
-                                    key={pIdx}
-                                    className="px-1.5 py-0.5 bg-gray-100 dark:bg-zinc-800 text-rose-600 dark:text-rose-400 rounded text-xs font-mono"
-                                  >
-                                    {part.slice(1, -1)}
-                                  </code>
-                                );
-                              }
-                              return part;
-                            })}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  );
-                });
-              })()}
+                  },
+                  h1({ children }) {
+                    return <h1 className="text-lg font-bold text-gray-900 dark:text-zinc-100 mt-3 mb-1.5">{children}</h1>;
+                  },
+                  h2({ children }) {
+                    return <h2 className="text-base font-bold text-gray-900 dark:text-zinc-100 mt-2.5 mb-1">{children}</h2>;
+                  },
+                  h3({ children }) {
+                    return <h3 className="text-sm font-bold text-gray-900 dark:text-zinc-100 mt-2 mb-1">{children}</h3>;
+                  },
+                  h4({ children }) {
+                    return <h4 className="text-xs font-bold text-gray-900 dark:text-zinc-100 mt-1.5 mb-0.5">{children}</h4>;
+                  },
+                  p({ children }) {
+                    return <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>;
+                  },
+                  ul({ children }) {
+                    return <ul className="list-disc pl-5 my-1.5 space-y-1">{children}</ul>;
+                  },
+                  ol({ children }) {
+                    return <ol className="list-decimal pl-5 my-1.5 space-y-1">{children}</ol>;
+                  },
+                  li({ children }) {
+                    return <li className="my-0.5">{children}</li>;
+                  },
+                  blockquote({ children }) {
+                    return (
+                      <blockquote className="pl-3 border-l-2 border-gray-300 dark:border-zinc-700 text-gray-600 dark:text-zinc-400 italic my-2">
+                        {children}
+                      </blockquote>
+                    );
+                  },
+                  a({ href, children }) {
+                    return (
+                      <a
+                        href={href}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-blue-600 dark:text-blue-400 underline hover:text-blue-800 dark:hover:text-blue-300 transition-colors"
+                      >
+                        {children}
+                      </a>
+                    );
+                  },
+                  hr() {
+                    return <hr className="my-3 border-gray-200 dark:border-zinc-800" />;
+                  },
+                }}
+              >
+                {msg.text || ""}
+              </Markdown>
             </div>
 
             {/* 4. AGENT WORKING MODE: Clarification Questions (支持 Questions 交互面板与 Answers 回答展示卡片) */}

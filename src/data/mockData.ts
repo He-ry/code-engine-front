@@ -211,10 +211,6 @@ export const AUTO_ACCEPT_MODES = [
 
 export const MODEL_OPTIONS = [
   { id: "auto", name: "Auto", provider: "智能模型选择", enProvider: "Smart Engine Selection" },
-  { id: "glm-5.2", name: "GLM-5.2-内部", provider: "智谱 AI", enProvider: "Zhipu AI" },
-  { id: "gemini-3.6", name: "Gemini 3.6 Flash", provider: "Google AI", enProvider: "Google AI" },
-  { id: "claude-3.5", name: "Claude 3.5 Sonnet", provider: "Anthropic", enProvider: "Anthropic" },
-  { id: "gpt-4o", name: "GPT-4o Engine", provider: "OpenAI", enProvider: "OpenAI" },
 ];
 
 export const FILE_TREE_BLACKBOX: FileNode[] = [
