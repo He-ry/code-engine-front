@@ -461,9 +461,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   // Connectivity Test States
   const [isTestingModalConn, setIsTestingModalConn] = useState(false);
-  const [modalConnResult, setModalConnResult] = useState<{ success: boolean; message: string; latency_ms?: number } | null>(null);
   const [testingModelIdMap, setTestingModelIdMap] = useState<Record<string, boolean>>({});
-  const [modelTestResults, setModelTestResults] = useState<Record<string, { success: boolean; message: string; latency_ms?: number }>>({});
 
   const [isProtocolOpen, setIsProtocolOpen] = useState(false);
   const [isLangOpen, setIsLangOpen] = useState(false);
@@ -514,11 +512,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setCustomError("");
     if (!customBaseUrl.trim() || !customModelId.trim()) {
       const errMsg = t("请至少填写 Base URL 与模型标识符", "Please fill in Base URL and Model ID");
-      setModalConnResult({ success: false, message: errMsg });
+      showError(t("连通性测试失败", "Connection Test Failed"), errMsg);
       return;
     }
     setIsTestingModalConn(true);
-    setModalConnResult(null);
     try {
       const res = await testModelConnection({
         provider: customName.trim() || "Custom",
@@ -527,7 +524,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         api_key: customApiKey.trim(),
         model: customModelId.trim(),
       });
-      setModalConnResult(res);
       if (res.success) {
         showSuccess(
           t("连通性测试成功", "Connection Test Passed"),
@@ -538,7 +534,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       }
     } catch (err: any) {
       const errMsg = err.message || t("测试异常", "Test Exception");
-      setModalConnResult({ success: false, message: errMsg });
       showError(t("连通性测试失败", "Connection Test Failed"), errMsg);
     } finally {
       setIsTestingModalConn(false);
@@ -565,7 +560,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         api_key: apiKeyVal,
         model: modelCodeVal,
       });
-      setModelTestResults((prev) => ({ ...prev, [modelId]: res }));
       if (res.success) {
         showSuccess(
           t("连通性测试成功", "Test Success"),
@@ -576,7 +570,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       }
     } catch (err: any) {
       const errMsg = err.message || t("测试失败", "Test failed");
-      setModelTestResults((prev) => ({ ...prev, [modelId]: { success: false, message: errMsg } }));
       showError(t("连通性测试失败", "Test Failed"), `${model.name}: ${errMsg}`);
     } finally {
       setTestingModelIdMap((prev) => ({ ...prev, [modelId]: false }));
@@ -1982,21 +1975,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                                 {model.hasImage && (
                                   <ImageIcon className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 stroke-[1.6]" />
                                 )}
-                                {modelTestResults[model.id] && (
-                                  <span
-                                    className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.2 rounded border transition-all ${
-                                      modelTestResults[model.id].success
-                                        ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 border-emerald-200/80 dark:border-emerald-800/80"
-                                        : "bg-red-50 text-red-700 dark:bg-red-950/60 dark:text-red-300 border-red-200/80 dark:border-red-800/80"
-                                    }`}
-                                    title={modelTestResults[model.id].message}
-                                  >
-                                    <span className={`w-1.5 h-1.5 rounded-full ${modelTestResults[model.id].success ? "bg-emerald-500" : "bg-red-500"}`} />
-                                    {modelTestResults[model.id].success
-                                      ? `${modelTestResults[model.id].latency_ms ? `${Math.round(modelTestResults[model.id].latency_ms!)}ms` : t("正常", "OK")}`
-                                      : t("失败", "Failed")}
-                                  </span>
-                                )}
                               </div>
 
                               <div className="flex items-center gap-1.5">
@@ -2253,26 +2231,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
               )}
 
-              {modalConnResult && (
-                <div
-                  className={`p-2.5 rounded-md text-xs border font-medium flex items-start gap-2 ${
-                    modalConnResult.success
-                      ? "bg-emerald-50 text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-200 border-emerald-200 dark:border-emerald-800"
-                      : "bg-red-50 text-red-800 dark:bg-red-950/50 dark:text-red-200 border-red-200 dark:border-red-800"
-                  }`}
-                >
-                  <Activity className={`w-4 h-4 shrink-0 mt-0.5 ${modalConnResult.success ? "text-emerald-500" : "text-red-500"}`} />
-                  <div className="space-y-0.5">
-                    <div className="font-semibold text-xs flex items-center gap-2">
-                      <span>{modalConnResult.success ? t("连通测试通过", "Connection Test Passed") : t("连通测试失败", "Connection Test Failed")}</span>
-                      {modalConnResult.latency_ms !== undefined && (
-                        <span className="text-[10px] opacity-80 font-mono">({Math.round(modalConnResult.latency_ms)}ms)</span>
-                      )}
-                    </div>
-                    <div className="text-[11px] leading-relaxed opacity-90">{modalConnResult.message}</div>
-                  </div>
-                </div>
-              )}
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                 <div className="space-y-1 col-span-1 sm:col-span-2 relative">
