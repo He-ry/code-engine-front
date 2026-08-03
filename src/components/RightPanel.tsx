@@ -220,7 +220,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({
           <div className="flex-1 overflow-y-auto p-3 space-y-3">
             <div className="flex items-center justify-between text-xs font-semibold text-gray-700 dark:text-zinc-200">
               <span>{t("源代码管理", "Source Control")}</span>
-              <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-mono">rongshu-3.8.0</span>
+              <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-mono">master</span>
             </div>
             <div className="p-2.5 bg-gray-50 dark:bg-zinc-900 rounded-lg border border-gray-200/80 dark:border-zinc-800 text-xs text-gray-600 dark:text-zinc-300 space-y-1">
               <div className="font-medium text-gray-800 dark:text-zinc-100">{t("未暂存的更改 (2)", "Unstaged Changes (2)")}</div>

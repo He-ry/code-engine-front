@@ -658,13 +658,13 @@ drwxr-xr-x  20 heruyi  staff   640B fe
 -rw-r--r--   1 heruyi  staff   3.4K AGENTS.md
 -rw-r--r--   1 heruyi  staff   820B build.sh`;
   } else if (cmd.startsWith("git")) {
-    output = `On branch rongshu-3.8.0\nYour branch is up to date with 'origin/rongshu-3.8.0'.\n\nnothing to commit, working tree clean`;
+    output = `On branch master\nYour branch is up to date with 'origin/master'.\n\nnothing to commit, working tree clean`;
   } else if (cmd === "pwd") {
     output = `/Users/heruyi/projects/${project || "blackbox-engine"}`;
   } else if (cmd === "clear") {
     output = "__CLEAR__";
   } else {
-    output = `[${cmd}] executed successfully on branch rongshu-3.8.0. (exit code 0)`;
+    output = `[${cmd}] executed successfully on branch master. (exit code 0)`;
   }
 
   res.json({ output, timestamp: new Date().toISOString() });

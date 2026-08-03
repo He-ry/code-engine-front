@@ -503,7 +503,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({
                     className="absolute left-0 bottom-full mb-2 w-44 bg-white dark:bg-zinc-900 rounded-lg shadow-lg border border-gray-200 dark:border-zinc-800 py-1 z-50"
                   >
                     <div className="px-2 py-1 text-[10px] text-gray-400 dark:text-zinc-500 font-medium">{t("Git 分支", "Git Branch")}</div>
-                    {["rongshu-3.8.0", "main", "dev-feature"].map((b) => (
+                    {["master", "main", "dev-feature"].map((b) => (
                       <button
                         key={b}
                         onClick={() => {

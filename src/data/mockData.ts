@@ -13,9 +13,9 @@ export const DEFAULT_PROJECTS: Project[] = [
     id: "blackbox",
     name: "blackbox-engine",
     subtext: "",
-    branch: "rongshu-3.8.0",
+    branch: "master",
     conversations: [
-      { id: "conv-1", title: "rongshu-3.8.0" },
+      { id: "conv-1", title: "master" },
     ],
     isActive: true,
   },
