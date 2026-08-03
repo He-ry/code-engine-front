@@ -17,9 +17,17 @@ import { SettingsModal, SettingsCategory } from "./components/SettingsModal";
 import { LoginPage } from "./components/LoginPage";
 import { useSettings } from "./context/SettingsContext";
 import { apiFetch } from "./lib/api";
+import {
+  createThread,
+  sendMessage,
+  streamChat,
+  approveTool,
+  respondInput,
+  interruptTurn,
+} from "./lib/agentClient";
 import { DEFAULT_PROJECTS, DEFAULT_CHAT_MESSAGES, EN_DEFAULT_CHAT_MESSAGES } from "./data/mockData";
-import { Project, ChatMessage, ContextPill, FileNode, OpenTab } from "./types";
-import { Folder, ChevronDown, Sparkles, Check, Globe, Languages } from "lucide-react";
+import { Project, ChatMessage, ContextPill, FileNode, OpenTab, ToolExecution } from "./types";
+import { Folder, ChevronDown, Sparkles, Check, Globe, Languages, ShieldAlert, ShieldCheck, ShieldX } from "lucide-react";
 
 const getInitialProjectId = () => {
   const match = matchPath({ path: "/project/:projectId" }, window.location.pathname);
@@ -44,7 +52,7 @@ const getInitialSettingsState = () => {
 };
 
 export default function App() {
-  const { customProviders, apiKey: globalApiKey, t, language, isLangSwitching, isThemeSwitching, theme, isLoggedIn, user, backendApiUrl, login } = useSettings();
+  const { t, language, isLangSwitching, isThemeSwitching, theme, isLoggedIn, user, backendApiUrl, login, backendModels, defaultModel } = useSettings();
   const [projects, setProjects] = useState<Project[]>(DEFAULT_PROJECTS);
   const initialProjectId = getInitialProjectId();
   const initialSettings = getInitialSettingsState();
@@ -252,14 +260,26 @@ export default function App() {
   const [activeTabPath, setActiveTabPath] = useState<string | null>(null);
 
   // Active chat state
-  const [messages, setMessages] = useState<ChatMessage[]>(() =>
-    language === "en-US" ? EN_DEFAULT_CHAT_MESSAGES : DEFAULT_CHAT_MESSAGES
-  );
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
-  const [selectedModel, setSelectedModel] = useState<string>("Auto");
+  // Default to the user's configured default model so the first send
+  // doesn't fall through to an arbitrary enabled model.
+  const [selectedModel, setSelectedModel] = useState<string>(() =>
+    defaultModel && defaultModel !== "Auto" ? defaultModel : "Auto"
+  );
   const [selectedMode, setSelectedMode] = useState<string>(() =>
     language === "en-US" ? "Auto Accept Edits" : "自动接受编辑"
   );
+
+  // Agent backend wiring
+  const threadIdRef = useRef<string | null>(null);
+  const activeAiMsgIdRef = useRef<string | null>(null);
+  const pendingInputRef = useRef<{ inputId: string; question: string } | null>(null);
+  const [pendingApproval, setPendingApproval] = useState<{
+    approvalId: string;
+    toolName: string;
+    arguments: Record<string, any>;
+  } | null>(null);
 
   // Sync default chat messages on language switch if user hasn't added custom messages
   useEffect(() => {
@@ -393,10 +413,213 @@ export default function App() {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
+    const threadId = threadIdRef.current;
+    if (threadId && user?.token) {
+      interruptTurn(backendApiUrl || "https://agent.hery.cloud", user.token, threadId).catch(
+        (e) => console.warn("Interrupt failed:", e)
+      );
+    }
     setIsGenerating(false);
   };
 
-  // Send prompt to backend API
+  /** Map a backend model selection (by display name) to a DB record id.
+   *
+   * Resolution order:
+   *   1. the user's configured default model (Settings → 默认模型)
+   *   2. the model selected in the prompt input
+   *   3. the first enabled model as a last resort
+   */
+  const resolveModelId = (modelName: string): string => {
+    const models = backendModels;
+    if (!models.length) return "";
+    const candidates = [defaultModel, modelName];
+    for (const cand of candidates) {
+      if (!cand || cand === "Auto") continue;
+      const hit = models.find((m) => m.name === cand || m.modelName === cand);
+      if (hit) return hit.id || hit.modelName || "";
+    }
+    const enabled = models.find((m) => m.isEnabled !== false);
+    return enabled?.id || enabled?.modelName || models[0]?.id || "";
+  };
+
+  /** Apply one SSE agent event to the active AI message. */
+  const handleAgentEvent = (
+    ev: { type: string; data: any },
+    aiMsgId: string
+  ) => {
+    const { type, data } = ev;
+    switch (type) {
+      case "agent_message_delta": {
+        const delta = data.delta || data.agentMessageDelta || "";
+        if (!delta) break;
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === aiMsgId
+              ? { ...m, text: m.text + delta, agentStatus: "generating" }
+              : m
+          )
+        );
+        break;
+      }
+      case "item_started": {
+        const item = data.item || {};
+        if (item.type === "command_execution") {
+          const exec: ToolExecution = {
+            id: item.id || item.callId || `te-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            name: item.tool || item.toolName || "tool",
+            command: item.command || "",
+            status: "running",
+          };
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === aiMsgId
+                ? {
+                    ...m,
+                    agentStatus: "executing_tool",
+                    toolExecutions: [...(m.toolExecutions || []), exec],
+                  }
+                : m
+            )
+          );
+        }
+        break;
+      }
+      case "item_completed": {
+        const item = data.item || {};
+        if (item.type === "command_execution") {
+          const id = item.id || item.callId || "";
+          const status: ToolExecution["status"] =
+            item.status === "failed" ? "error" : "success";
+          const result =
+            item.aggregatedOutput != null ? String(item.aggregatedOutput) : "";
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === aiMsgId
+                ? {
+                    ...m,
+                    toolExecutions: (m.toolExecutions || []).map((te) =>
+                      te.id === id ? { ...te, status, result } : te
+                    ),
+                  }
+                : m
+            )
+          );
+        }
+        break;
+      }
+      case "user_input_required": {
+        const inputId = data.inputId || data.input_id || "";
+        const question = data.question || "";
+        if (inputId) {
+          pendingInputRef.current = { inputId, question };
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === aiMsgId
+                ? {
+                    ...m,
+                    agentStatus: "asking_clarification",
+                    clarificationQuestions: [
+                      {
+                        id: inputId,
+                        question,
+                        options: [
+                          {
+                            label: t("输入回答...", "Type your answer..."),
+                            value: "custom",
+                            isCustomInput: true,
+                          },
+                        ],
+                      },
+                    ],
+                  }
+                : m
+            )
+          );
+        }
+        break;
+      }
+      case "approval_required": {
+        setPendingApproval({
+          approvalId: data.approvalId || data.approval_id || "",
+          toolName: data.toolName || data.tool_name || "",
+          arguments: data.arguments || {},
+        });
+        break;
+      }
+      case "error": {
+        const msg = data.message || data.error || "Agent error";
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === aiMsgId
+              ? {
+                  ...m,
+                  text:
+                    m.text + (m.text ? "\n\n" : "") + `> ⚠️ ${msg}`,
+                  agentStatus: "completed",
+                  isStreaming: false,
+                }
+              : m
+          )
+        );
+        break;
+      }
+      default:
+        break;
+    }
+  };
+
+  /** Handle AskUser card submission → forward to the backend respond API. */
+  const handleAskUserSubmit = async (
+    questionId: string,
+    _optionValue: string,
+    optionLabel: string
+  ) => {
+    const pending = pendingInputRef.current;
+    const threadId = threadIdRef.current;
+    if (!pending || pending.inputId !== questionId || !threadId) return;
+
+    // optionLabel is "Question\n答：Answer" — extract the answer after the label.
+    let answer = "";
+    for (const line of (optionLabel || "").split("\n")) {
+      const m = line.match(/(?:答：|Answer:)\s*(.+)/);
+      if (m) answer = m[1].trim();
+    }
+    if (!answer) answer = optionLabel || "";
+
+    try {
+      await respondInput(
+        backendApiUrl || "https://agent.hery.cloud",
+        user?.token || "",
+        threadId,
+        pending.inputId,
+        answer
+      );
+    } catch (e) {
+      console.warn("AskUser respond failed:", e);
+    }
+    pendingInputRef.current = null;
+  };
+
+  /** Approve or deny a pending sensitive-tool approval. */
+  const handleApproval = async (approved: boolean) => {
+    const p = pendingApproval;
+    const threadId = threadIdRef.current;
+    if (!p || !threadId) return;
+    setPendingApproval(null);
+    try {
+      await approveTool(
+        backendApiUrl || "https://agent.hery.cloud",
+        user?.token || "",
+        threadId,
+        p.approvalId,
+        approved
+      );
+    } catch (e) {
+      console.warn("Approval failed:", e);
+    }
+  };
+
+  // Send prompt to the CodeEngine agent backend (thread-based, SSE stream).
   const handleSendPrompt = async (
     text: string,
     pills: ContextPill[],
@@ -412,178 +635,90 @@ export default function App() {
       mode,
       model,
     };
-
     setMessages((prev) => [...prev, userMsg]);
     setIsGenerating(true);
+
+    const baseUrl = backendApiUrl || "https://agent.hery.cloud";
+    const token = user?.token || "";
+    const modelId = resolveModelId(model);
+    if (!modelId) {
+      setIsGenerating(false);
+      window.dispatchEvent(
+        new CustomEvent("app:show_toast", {
+          detail: {
+            type: "error",
+            title: t("未配置可用模型", "No model configured"),
+            description: t(
+              "请先在设置中添加/启用一个 AI 模型，或在后端 config.yaml 中配置默认模型。",
+              "Please add or enable an AI model in Settings, or configure a default model on the backend."
+            ),
+            duration: 5000,
+          },
+        })
+      );
+      return;
+    }
 
     const controller = new AbortController();
     abortControllerRef.current = controller;
 
+    const aiMsgId = (Date.now() + 1).toString();
+    activeAiMsgIdRef.current = aiMsgId;
+    const aiMsg: ChatMessage = {
+      id: aiMsgId,
+      sender: "ai",
+      text: "",
+      timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      model,
+      agentStatus: "thinking",
+      isStreaming: true,
+    };
+    setMessages((prev) => [...prev, aiMsg]);
+
     try {
-      const customProvider = customProviders.find((p) => p.name === model);
-      const baseUrl = backendApiUrl ? backendApiUrl : "";
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (user?.token) {
-        headers["Authorization"] = `Bearer ${user.token}`;
-      }
-      const res = await apiFetch(`${baseUrl}/api/chat`, {
-        method: "POST",
-        signal: controller.signal,
-        headers,
-        body: JSON.stringify({
-          prompt: text,
-          model,
-          mode,
-          project: activeProject.name,
-          contextPills: pills.map((p) => p.name),
-          customProvider: customProvider ? {
-            baseUrl: customProvider.baseUrl,
-            apiKey: customProvider.apiKey,
-            protocol: customProvider.protocol,
-            modelName: customProvider.modelName,
-          } : null,
-          globalApiKey,
-        }),
-      });
-
-      if (!res.ok) {
-        throw new Error(`HTTP error! status: ${res.status}`);
+      // 1. Ensure a thread exists (reuse across turns).
+      let threadId = threadIdRef.current;
+      if (!threadId) {
+        const created = await createThread(baseUrl, token, modelId, activeProject.name || "New Chat");
+        threadId = created.threadId;
+        threadIdRef.current = threadId;
       }
 
-      // Check if prompt requires code generation snippets
-      let codeSnippets: { filename: string; code: string; language: string }[] = [];
-      if (
-        text.includes("代码") ||
-        text.includes("重构") ||
-        text.includes("算法") ||
-        text.includes("PPT")
-      ) {
-        codeSnippets = [
-          {
-            filename: "core/engine.ts",
-            language: "typescript",
-            code: `// CodeX Generated Execution Routine for ${activeProject.name}\nimport { AICompletionEngine } from './completion';\n\nexport async function runTaskPipeline(input: string) {\n  console.log('[CodeX] Task started for:', input);\n  return { success: true, timestamp: Date.now() };\n}`,
-          },
-        ];
+      // 2. Submit the user message (agent runs in the background).
+      await sendMessage(baseUrl, token, threadId, modelId, text);
 
-        // Also open core/engine.ts in editor tabs automatically
-        handleOpenFile({
-          name: "engine.ts",
-          type: "file",
-          path: "core/engine.ts",
-          content: `// CodeX Generated Execution Routine for ${activeProject.name}\nimport { AICompletionEngine } from './completion';\n\nexport async function runTaskPipeline(input: string) {\n  console.log('[CodeX] Task started for:', input);\n  return { success: true, timestamp: Date.now() };\n}`,
-        });
-      }
+      // 3. Stream agent events and render them onto the active message.
+      await streamChat(baseUrl, token, threadId, (ev) => {
+        if (controller.signal.aborted) return;
+        handleAgentEvent(ev, aiMsgId);
+      }, controller.signal);
 
-      const aiMsgId = (Date.now() + 1).toString();
-      const aiMsg: ChatMessage = {
-        id: aiMsgId,
-        sender: "ai",
-        text: "",
-        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        model,
-        agentStatus: "completed",
-        thinkingProcess: {
-          durationSec: parseFloat((Math.random() * 2 + 1).toFixed(1)),
-          thoughtText: t(
-            `1. 接收输入: "${text}"，解构需求与涉及的文件与模块。\n2. 调度项目 ${activeProject.name} (分支: ${activeProject.branch}) 关联的规则链条。\n3. 执行工作区静态检查与代码重构策略 (${mode})，确保变更可平滑部署。`,
-            `1. Received input: "${text}", analyzing requirements and involved files/modules.\n2. Dispatched rule chain for project ${activeProject.name} (branch: ${activeProject.branch}).\n3. Executed static check and code refactoring strategy (${mode}), ensuring smooth deployment.`
-          ),
-          isCollapsed: false,
-        },
-        toolExecutions: [
-          {
-            id: `te-${Date.now()}-1`,
-            name: "view_file",
-            args: `path: '${activeProject.name}/workspace'`,
-            status: "success",
-            result: t("读取 86 行配置文件", "Read 86 lines config file"),
-            duration: "90ms",
-          },
-          {
-            id: `te-${Date.now()}-2`,
-            name: "lint_applet",
-            args: "checker: 'TypeScript compiler'",
-            status: "success",
-            result: t("0 错误", "0 errors"),
-            duration: "180ms",
-          },
-        ],
-        codeSnippets,
-      };
-
-      setMessages((prev) => [...prev, aiMsg]);
-
-      const reader = res.body?.getReader();
-      const decoder = new TextDecoder("utf-8");
-      let partialText = "";
-      let buffer = "";
-
-      if (reader) {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-
-          for (const line of lines) {
-            const cleaned = line.trim();
-            if (!cleaned) continue;
-            if (cleaned.startsWith("data: ")) {
-              const dataStr = cleaned.slice(6).trim();
-              if (dataStr === "[DONE]") {
-                break;
+      // Mark the message complete when the stream ends normally.
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === aiMsgId
+            ? { ...m, agentStatus: "completed", isStreaming: false }
+            : m
+        )
+      );
+    } catch (err: any) {
+      const msg = err?.message || "Agent request failed";
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === aiMsgId
+            ? {
+                ...m,
+                text:
+                  m.text + (m.text ? "\n\n" : "") + `> ⚠️ ${msg}`,
+                agentStatus: "completed",
+                isStreaming: false,
               }
-              try {
-                const parsed = JSON.parse(dataStr);
-                if (parsed.text) {
-                  partialText += parsed.text;
-                  setMessages((prev) =>
-                    prev.map((m) => (m.id === aiMsgId ? { ...m, text: partialText } : m))
-                  );
-                }
-              } catch (e) {
-                // ignore
-              }
-            }
-          }
-        }
-      }
-    } catch {
-      const fallbackMsg: ChatMessage = {
-        id: (Date.now() + 1).toString(),
-        sender: "ai",
-        text: t(
-          `已根据需求完成对 ${activeProject.name} 的分析与调整。已应用模式：${mode}`,
-          `Analysis and adjustments for ${activeProject.name} completed as requested. Mode applied: ${mode}`
-        ),
-        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        model,
-        agentStatus: "completed",
-        thinkingProcess: {
-          durationSec: 1.5,
-          thoughtText: t(
-            `1. 解析指令内容 "${text}"。\n2. 扫描本地工作区并匹配修改模板。\n3. 应用调整并更新缓存状态。`,
-            `1. Parsed instruction content "${text}".\n2. Scanned local workspace and matched modification templates.\n3. Applied adjustments and updated cache status.`
-          ),
-          isCollapsed: false,
-        },
-        toolExecutions: [
-          {
-            id: `te-${Date.now()}-1`,
-            name: "edit_file",
-            args: `target: '${activeProject.name}'`,
-            status: "success",
-            result: t("修改完成", "Modification complete"),
-            duration: "110ms",
-          },
-        ],
-      };
-      setMessages((prev) => [...prev, fallbackMsg]);
+            : m
+        )
+      );
     } finally {
       setIsGenerating(false);
+      activeAiMsgIdRef.current = null;
     }
   };
 
@@ -654,6 +789,67 @@ export default function App() {
               </span>
             </motion.div>
           </>
+        )}
+      </AnimatePresence>
+
+      {/* Tool Approval Modal — sensitive tools (bash/write_file) need user consent */}
+      <AnimatePresence>
+        {pendingApproval && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[110] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96, y: 8 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96, y: 8 }}
+              transition={{ duration: 0.18, ease: "easeOut" }}
+              className="w-full max-w-md rounded-2xl border border-gray-200 dark:border-[#2a2a2a] bg-white dark:bg-[#171717] p-5 shadow-2xl space-y-4"
+            >
+              <div className="flex items-center gap-2.5">
+                <span className="p-2 rounded-lg bg-amber-500/10 text-amber-600 dark:text-amber-400">
+                  <ShieldAlert className="w-5 h-5" />
+                </span>
+                <div>
+                  <div className="text-sm font-semibold text-gray-900 dark:text-zinc-100">
+                    {t("工具执行需要审批", "Tool execution requires approval")}
+                  </div>
+                  <div className="text-xs text-gray-500 dark:text-zinc-400 font-mono">
+                    {pendingApproval.toolName || "tool"}
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-lg bg-gray-50 dark:bg-zinc-900/60 border border-gray-100 dark:border-zinc-800 px-3 py-2.5 text-xs text-gray-700 dark:text-zinc-300 whitespace-pre-wrap break-all max-h-40 overflow-y-auto font-mono">
+                {(() => {
+                  try {
+                    return JSON.stringify(pendingApproval.arguments, null, 2);
+                  } catch {
+                    return String(pendingApproval.arguments);
+                  }
+                })()}
+              </div>
+
+              <div className="flex justify-end gap-2 pt-1">
+                <button
+                  onClick={() => handleApproval(false)}
+                  className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg border border-gray-200 dark:border-zinc-700 text-xs font-medium text-gray-700 dark:text-zinc-300 hover:bg-gray-50 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                >
+                  <ShieldX className="w-3.5 h-3.5 text-rose-500" />
+                  {t("拒绝", "Deny")}
+                </button>
+                <button
+                  onClick={() => handleApproval(true)}
+                  className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-900 dark:bg-zinc-200 dark:hover:bg-white text-white dark:text-zinc-900 text-xs font-medium transition-colors cursor-pointer"
+                >
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  {t("允许", "Approve")}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
         )}
       </AnimatePresence>
 
@@ -850,14 +1046,7 @@ export default function App() {
                       <ChatStream
                         messages={messages}
                         isGenerating={isGenerating}
-                        onSelectOption={(questionId, optionValue, optionLabel) => {
-                          handleSendPrompt(
-                            t(`已选择方案：${optionLabel}`, `Selected option: ${optionLabel}`),
-                            [{ id: "opt-1", name: optionValue, type: "ask" }],
-                            t("自动接受编辑", "Auto Accept Edits"),
-                            "DeepSeek-V3"
-                          );
-                        }}
+                        onSelectOption={handleAskUserSubmit}
                       />
                       <div className="p-3 bg-[#f5f5f7]/90 dark:bg-zinc-950/90 backdrop-blur-xs">
                         <PromptInput
