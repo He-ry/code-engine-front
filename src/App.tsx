@@ -97,69 +97,45 @@ export default function App() {
         }
         
         if (!userProfile) {
-          const name = searchParams.get("name") || searchParams.get("username") || searchParams.get("login");
-          const email = searchParams.get("email") || (name ? `${name}@github.user` : undefined);
-          const avatarUrl = searchParams.get("avatarUrl") || searchParams.get("avatar_url") || searchParams.get("avatar");
           const token = searchParams.get("token") || searchParams.get("access_token") || searchParams.get("jwt");
           const refresh_token = searchParams.get("refresh_token") || searchParams.get("refreshToken");
           const code = searchParams.get("code");
           const state = searchParams.get("state") || "";
 
           const baseUrl = backendApiUrl || "https://agent.hery.cloud";
-          
-          if (token) {
-            // Try fetching full profile from /api/auth/me
+
+          const buildProfileFromMe = async (authToken: string, refreshToken?: string) => {
             try {
               const meRes = await apiFetch(`${baseUrl}/api/auth/me`, {
-                headers: {
-                  "Authorization": `Bearer ${token}`
-                }
+                headers: { "Authorization": `Bearer ${authToken}` }
               });
               if (meRes.ok) {
                 const meData = await meRes.json();
-                const userData = meData.data || meData.user || meData;
-                userProfile = {
-                  name: userData.nick_name || userData.username || userData.name || name || "GitHub User",
-                  email: userData.email || email || `${userData.username || name || "user"}@github.user`,
-                  avatarUrl: userData.avatar || userData.avatar_url || avatarUrl || `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(userData.username || name || "github")}`,
-                  provider: "github",
-                  token,
-                  refreshToken: refresh_token
+                const u = meData.data || meData.user || meData;
+                return {
+                  name: u.username || "",
+                  email: u.email || "",
+                  avatarUrl: u.avatar || u.avatar_url || "",
+                  provider: "github" as const,
+                  token: authToken,
+                  refreshToken: refreshToken,
                 };
               }
-            } catch (err) {
-              console.error("Error fetching full user profile from backend:", err);
-            }
+            } catch {}
+            return null;
+          };
 
-            if (!userProfile) {
-              userProfile = {
-                name: name || "GitHub User",
-                email: email || "user@github.user",
-                avatarUrl: avatarUrl || `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(name || "github")}`,
-                provider: "github",
-                token,
-                refreshToken: refresh_token
-              };
-            }
+          if (token) {
+            userProfile = await buildProfileFromMe(token, refresh_token);
           } else if (code) {
-            // Try exchanging code with backend endpoint
             try {
               const cbRes = await fetch(`${baseUrl}/api/auth/oauth/github/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`);
               if (cbRes.ok) {
                 const cbData = await cbRes.json();
                 const tokenFromCb = cbData.access_token || cbData.token || cbData.data?.access_token;
                 const refTokenFromCb = cbData.refresh_token || cbData.data?.refresh_token;
-                const userData = cbData.user || cbData.data?.user || cbData.data;
-
                 if (tokenFromCb) {
-                  userProfile = {
-                    name: userData?.nick_name || userData?.username || userData?.name || "GitHub User",
-                    email: userData?.email || `${userData?.username || "user"}@github.user`,
-                    avatarUrl: userData?.avatar || userData?.avatar_url || `https://api.dicebear.com/7.x/adventurer/svg?seed=github`,
-                    provider: "github",
-                    token: tokenFromCb,
-                    refreshToken: refTokenFromCb
-                  };
+                  userProfile = await buildProfileFromMe(tokenFromCb, refTokenFromCb);
                 }
               }
             } catch (err) {

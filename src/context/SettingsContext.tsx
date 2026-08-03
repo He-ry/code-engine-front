@@ -32,7 +32,7 @@ export interface UserProfile {
   name: string;
   email: string;
   avatarUrl?: string;
-  provider: "github" | "google" | "email" | "guest";
+  provider: "github" | "google" | "email";
   token?: string;
   refreshToken?: string;
 }
@@ -142,6 +142,46 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     localStorage.removeItem("app_is_logged_in");
     localStorage.removeItem("app_user_profile");
   };
+
+  useEffect(() => {
+    // On mount, refresh user profile from backend to fix stale/incorrect names
+    const storedUser = localStorage.getItem("app_user_profile");
+    if (!storedUser) return;
+    let parsedUser: UserProfile | null = null;
+    try {
+      parsedUser = JSON.parse(storedUser);
+    } catch {
+      return;
+    }
+    if (!parsedUser?.token) return;
+
+    // Only refresh if name looks wrong (email format, "GitHub User", or generic fallback)
+    const nameNeedsFix = !parsedUser.name
+      || parsedUser.name.includes("@")
+      || parsedUser.name === "GitHub User"
+      || parsedUser.name === "GitHubuser";
+
+    if (!nameNeedsFix && parsedUser.name !== "User") return;
+
+    const baseUrl = localStorage.getItem("app_backend_api_url") || "https://agent.hery.cloud";
+    fetch(`${baseUrl}/api/auth/me`, {
+      headers: { "Authorization": `Bearer ${parsedUser.token}` }
+    })
+      .then(res => res.ok ? res.json() : null)
+      .then(meData => {
+        if (!meData) return;
+        const u = meData.data || meData.user || meData;
+        const updated: UserProfile = {
+          ...parsedUser!,
+          name: u.username || "",
+          email: u.email || "",
+          avatarUrl: u.avatar || u.avatar_url || parsedUser!.avatarUrl || "",
+        };
+        setUser(updated);
+        localStorage.setItem("app_user_profile", JSON.stringify(updated));
+      })
+      .catch(() => { /* silent */ });
+  }, []);
 
   useEffect(() => {
     let lastHandledTime = 0;

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { motion, AnimatePresence } from "motion/react";
+import { motion } from "motion/react";
 import { useSettings, UserProfile } from "../context/SettingsContext";
 import { useToast } from "../context/ToastContext";
 import { CodexLogo } from "./CodexLogo";
@@ -7,7 +7,6 @@ import {
   Mail,
   Eye,
   EyeOff,
-  Sparkles,
   Globe,
   Sun,
   Moon,
@@ -18,8 +17,6 @@ import {
   Lock,
   Check,
   Loader2,
-  X,
-  AlertCircle,
   FileCode,
   Zap,
   MessageSquare,
@@ -273,7 +270,6 @@ export const LoginPage: React.FC = () => {
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // Simulated OAuth states
   const [oauthProvider, setOauthProvider] = useState<"github" | "google" | null>(null);
@@ -399,24 +395,23 @@ export const LoginPage: React.FC = () => {
         setOauthProvider(null);
       } else if (event.data?.type === "OAUTH_AUTH_FAILURE") {
         setOauthStep("authorize");
-        setErrorMessage(event.data.error || "OAuth Failed");
+        showError(t("OAuth 登录失败", "OAuth Failed"), event.data.error || "OAuth Failed");
       }
     };
 
     window.addEventListener("message", handleOAuthMessage);
     return () => window.removeEventListener("message", handleOAuthMessage);
-  }, [login, t]);
+  }, [login, t, showError]);
 
   const handleEmailLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    setErrorMessage(null);
 
     if (!email) {
-      setErrorMessage(t("请输入邮箱地址", "Please enter your email address"));
+      showError(t("请输入邮箱地址", "Please enter your email address"));
       return;
     }
     if (!password || password.length < 6) {
-      setErrorMessage(t("密码长度不能少于 6 位", "Password must be at least 6 characters"));
+      showError(t("密码长度不能少于 6 位", "Password must be at least 6 characters"));
       return;
     }
 
@@ -445,11 +440,11 @@ export const LoginPage: React.FC = () => {
 
         if (meRes.ok) {
           const meData = await meRes.json();
-          const userData = meData.data || meData;
+          const u = meData.data || meData;
           const profile: UserProfile = {
-            name: userData.nick_name || userData.username || email.split("@")[0],
-            email: userData.email || email,
-            avatarUrl: userData.avatar || `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(userData.username || "user")}`,
+            name: u.username || "",
+            email: u.email || "",
+            avatarUrl: u.avatar || "",
             provider: "email",
             token,
             refreshToken,
@@ -457,9 +452,9 @@ export const LoginPage: React.FC = () => {
           login(profile);
         } else {
           const profile: UserProfile = {
-            name: email.split("@")[0],
+            name: "",
             email: email,
-            avatarUrl: `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(email)}`,
+            avatarUrl: "",
             provider: "email",
             token,
             refreshToken,
@@ -495,14 +490,27 @@ export const LoginPage: React.FC = () => {
             const token2 = loginData2.access_token;
             const refreshToken2 = loginData2.refresh_token;
 
-            const profile: UserProfile = {
-              name: email.split("@")[0],
+            // Fetch real profile from /api/auth/me
+            let profile: UserProfile = {
+              name: "",
               email: email,
-              avatarUrl: `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(email)}`,
+              avatarUrl: "",
               provider: "email",
               token: token2,
               refreshToken: refreshToken2,
             };
+            try {
+              const meRes2 = await fetch(`${baseUrl}/api/auth/me`, {
+                headers: { "Authorization": `Bearer ${token2}` }
+              });
+              if (meRes2.ok) {
+                const meData2 = await meRes2.json();
+                const u2 = meData2.data || meData2;
+                profile.name = u2.username || "";
+                profile.email = u2.email || email;
+                profile.avatarUrl = u2.avatar || "";
+              }
+            } catch {}
             login(profile);
             showSuccess(t("登录成功", "Login Successful"), t(`欢迎回来，${profile.name}`, `Welcome back, ${profile.name}`));
             return;
@@ -518,13 +526,11 @@ export const LoginPage: React.FC = () => {
             errorMsg = typeof errJson.detail === "string" ? errJson.detail : JSON.stringify(errJson.detail);
           }
         } catch (_) {}
-        setErrorMessage(errorMsg);
         showError(t("登录失败", "Login Failed"), errorMsg);
       }
     } catch (err: any) {
       console.error("Login process error:", err);
       const connErr = t("连接认证服务失败，请检查网络", "Failed to connect to authentication service, please check your network");
-      setErrorMessage(connErr);
       showError(t("连接失败", "Connection Error"), connErr);
     } finally {
       setIsSubmitting(false);
@@ -538,7 +544,6 @@ export const LoginPage: React.FC = () => {
 
   const handleAuthorizeOauth = async (providerOverride?: "github" | "google") => {
     const activeProvider = providerOverride || oauthProvider;
-    setErrorMessage(null);
     setOauthStep("connecting");
 
     try {
@@ -620,18 +625,8 @@ export const LoginPage: React.FC = () => {
     } catch (err: any) {
       setOauthProvider(null);
       setOauthStep("authorize");
-      setErrorMessage(err.message || `${activeProvider ? activeProvider.toUpperCase() : "OAuth"} 登录启动失败`);
+      showError(t("OAuth 登录启动失败", "OAuth Failed"), err.message || `${activeProvider ? activeProvider.toUpperCase() : "OAuth"} 登录启动失败`);
     }
-  };
-
-  const handleGuestLogin = () => {
-    const profile: UserProfile = {
-      name: t("游客用户", "Guest User"),
-      email: "guest@codeengine.dev",
-      avatarUrl: "https://api.dicebear.com/7.x/bottts/svg?seed=GuestCodeEngine",
-      provider: "guest"
-    };
-    login(profile);
   };
 
   const scenario = mockScenarios[scenarioIdx];
@@ -914,27 +909,6 @@ export const LoginPage: React.FC = () => {
                 </span>
               </div>
 
-              {/* Error messages */}
-              <AnimatePresence mode="wait">
-                {errorMessage && (
-                  <motion.div
-                    initial={{ opacity: 0, height: 0 }}
-                    animate={{ opacity: 1, height: "auto" }}
-                    exit={{ opacity: 0, height: 0 }}
-                    className="p-3 bg-rose-50 dark:bg-rose-950/20 text-rose-600 dark:text-rose-400 text-xs rounded-lg border border-rose-100 dark:border-rose-900/40 flex items-start gap-2 overflow-hidden"
-                  >
-                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                    <div className="flex-1 font-medium">{errorMessage}</div>
-                    <button 
-                      onClick={() => setErrorMessage(null)} 
-                      className="p-0.5 rounded hover:bg-rose-100/60 dark:hover:bg-rose-950/40 cursor-pointer"
-                    >
-                      <X className="w-3 h-3" />
-                    </button>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-
               {/* Form fields */}
               <form onSubmit={handleEmailLogin} className="space-y-3.5">
                 <div className="space-y-1">
@@ -1007,23 +981,6 @@ export const LoginPage: React.FC = () => {
                 </button>
               </form>
 
-              {/* Direct Bypass and Guest access */}
-              <div className="relative flex items-center justify-center py-1">
-                <div className="absolute inset-0 flex items-center">
-                  <div className="w-full border-t border-gray-200/80 dark:border-zinc-800/80" />
-                </div>
-                <span className="relative px-3 text-[9px] text-gray-400 dark:text-zinc-500 bg-[#fafafb] dark:bg-[#070709]">
-                  {t("暂无账户？", "New to CodeEngine?")}
-                </span>
-              </div>
-
-              <button
-                onClick={handleGuestLogin}
-                className="w-full flex items-center justify-center gap-2 py-2 px-3 text-xs font-bold text-gray-500 dark:text-zinc-400 hover:bg-gray-100 dark:hover:bg-zinc-900/40 hover:text-gray-700 dark:hover:text-zinc-200 border border-gray-200/80 dark:border-zinc-800/80 rounded-lg transition-all duration-150 cursor-pointer bg-transparent active:scale-[0.98]"
-              >
-                <Sparkles className="w-3.5 h-3.5 text-amber-500 animate-pulse" />
-                <span>{t("免密以游客身份进入", "Instant Guest Bypass")}</span>
-              </button>
             </motion.div>
           </div>
 
