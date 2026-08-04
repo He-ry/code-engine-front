@@ -101,9 +101,9 @@ export const ToolInvocationCard: React.FC<ToolInvocationCardProps> = ({
 
       {/* 2. Main Card Body (Matching user screenshot) */}
       {!isCollapsed && (
-        <div className="w-full rounded-xl border border-gray-200/90 dark:border-[#2a2a2a] bg-[#f4f4f6] dark:bg-[#171717] p-3.5 space-y-3 font-sans shadow-2xs">
+        <div className="w-full rounded-xl border border-gray-200/90 dark:border-[#2a2a2a] bg-[#f0f0f0] dark:bg-[#171717] p-3.5 space-y-3 font-sans shadow-2xs">
           {/* Command Snippet Box */}
-          <div className="w-full rounded-lg border border-gray-200/80 dark:border-[#2a2a2a] bg-[#eaeaee] dark:bg-[#0b0b0b] p-2.5 font-mono text-xs overflow-x-auto text-gray-800 dark:text-[#ededed]">
+          <div className="w-full rounded-lg border border-gray-200/80 dark:border-[#2a2a2a] bg-[#e4e4e7] dark:bg-[#0b0b0b] p-2.5 font-mono text-xs overflow-x-auto text-gray-800 dark:text-[#ededed]">
             <span className="text-teal-600 dark:text-teal-400 font-bold">$ </span>
             {highlightShellCommand(tool.command || tool.args || "")}
           </div>

@@ -329,7 +329,7 @@ export const CodeBlock: React.FC<CodeBlockProps> = ({ code, filename, language, 
   };
 
   return (
-    <div className="w-full my-3.5 rounded-xl border border-gray-300/80 dark:border-zinc-800 bg-[#f0f0f0] dark:bg-[#18181c] overflow-hidden shadow-2xs font-mono text-xs">
+    <div className="w-full my-3.5 rounded-md border border-gray-300/80 dark:border-zinc-800 bg-[#f0f0f0] dark:bg-[#18181c] overflow-hidden shadow-2xs font-mono text-xs">
       {/* Header bar: Soft grey header matching #f0f0f0 theme */}
       <div className="px-4 py-2 bg-[#e4e4e7] dark:bg-[#222227] border-b border-gray-300/70 dark:border-zinc-800 flex items-center justify-between text-gray-700 dark:text-zinc-300 select-none">
         <div className="flex items-center gap-2">

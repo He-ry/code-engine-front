@@ -904,67 +904,6 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* Tool Approval Modal — sensitive tools (bash/write_file) need user consent */}
-      <AnimatePresence>
-        {pendingApproval && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[110] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
-          >
-            <motion.div
-              initial={{ opacity: 0, scale: 0.96, y: 8 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.96, y: 8 }}
-              transition={{ duration: 0.18, ease: "easeOut" }}
-              className="w-full max-w-md rounded-2xl border border-gray-200 dark:border-[#2a2a2a] bg-white dark:bg-[#171717] p-5 shadow-2xl space-y-4"
-            >
-              <div className="flex items-center gap-2.5">
-                <span className="p-2 rounded-lg bg-amber-500/10 text-amber-600 dark:text-amber-400">
-                  <ShieldAlert className="w-5 h-5" />
-                </span>
-                <div>
-                  <div className="text-sm font-semibold text-gray-900 dark:text-zinc-100">
-                    {t("工具执行需要审批", "Tool execution requires approval")}
-                  </div>
-                  <div className="text-xs text-gray-500 dark:text-zinc-400 font-mono">
-                    {pendingApproval.toolName || "tool"}
-                  </div>
-                </div>
-              </div>
-
-              <div className="rounded-lg bg-gray-50 dark:bg-zinc-900/60 border border-gray-100 dark:border-zinc-800 px-3 py-2.5 text-xs text-gray-700 dark:text-zinc-300 whitespace-pre-wrap break-all max-h-40 overflow-y-auto font-mono">
-                {(() => {
-                  try {
-                    return JSON.stringify(pendingApproval.arguments, null, 2);
-                  } catch {
-                    return String(pendingApproval.arguments);
-                  }
-                })()}
-              </div>
-
-              <div className="flex justify-end gap-2 pt-1">
-                <button
-                  onClick={() => handleApproval(false)}
-                  className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg border border-gray-200 dark:border-zinc-700 text-xs font-medium text-gray-700 dark:text-zinc-300 hover:bg-gray-50 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-                >
-                  <ShieldX className="w-3.5 h-3.5 text-rose-500" />
-                  {t("拒绝", "Deny")}
-                </button>
-                <button
-                  onClick={() => handleApproval(true)}
-                  className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-900 dark:bg-zinc-200 dark:hover:bg-white text-white dark:text-zinc-900 text-xs font-medium transition-colors cursor-pointer"
-                >
-                  <ShieldCheck className="w-3.5 h-3.5" />
-                  {t("允许", "Approve")}
-                </button>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
       {/* Full-screen Settings Overlay */}
       <AnimatePresence>
         {isSettingsOpen && (
@@ -1047,7 +986,7 @@ export default function App() {
                     : "100%",
               }}
               transition={isResizingChat || isResizingRight ? { duration: 0 } : { duration: 0.28, ease: [0.2, 0, 0, 1] }}
-              className="flex flex-col bg-[#f5f5f7] dark:bg-zinc-950 relative overflow-y-auto shrink-0 h-full"
+              className="flex flex-col bg-[#ffffff] dark:bg-zinc-950 relative overflow-y-auto shrink-0 h-full"
             >
               <AnimatePresence mode="wait">
                 <motion.div
@@ -1161,8 +1100,10 @@ export default function App() {
                         messages={messages}
                         isGenerating={isGenerating}
                         onSelectOption={handleAskUserSubmit}
+                        pendingApproval={pendingApproval}
+                        onApproval={handleApproval}
                       />
-                      <div className="p-3 bg-[#f5f5f7]/90 dark:bg-zinc-950/90 backdrop-blur-xs">
+                      <div className="p-3 bg-[#ffffff]/90 dark:bg-zinc-950/90 backdrop-blur-xs">
                         <PromptInput
                           onSend={handleSendPrompt}
                           projectName={activeProject.name}

@@ -228,7 +228,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({
   return (
     <div className="w-full max-w-3xl mx-auto relative font-sans">
       {/* Main Container Card */}
-      <div className="bg-white dark:bg-zinc-900 rounded-2xl border border-gray-200 dark:border-zinc-800 shadow-md hover:shadow-lg transition-shadow duration-200 overflow-visible relative flex flex-col p-0">
+      <div className="bg-white dark:bg-zinc-900 rounded-xl border border-gray-200 dark:border-zinc-800 shadow-md hover:shadow-lg transition-shadow duration-200 overflow-visible relative flex flex-col p-0">
         {/* Input & Pills Container (Integrated inside the input box, vertically stacked) */}
         <div 
           className="flex flex-col cursor-text"
@@ -292,7 +292,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({
           </div>
 
           {/* Bottom Toolbar inside the Input Box */}
-          <div className="flex items-center justify-between px-4 py-2.5 relative bg-gray-50/50 dark:bg-zinc-900/60 border-t border-gray-100 dark:border-zinc-800/60 rounded-b-2xl w-full">
+          <div className="flex items-center justify-between px-4 py-2.5 relative bg-gray-50/50 dark:bg-zinc-900/60 border-t border-gray-100 dark:border-zinc-800/60 rounded-b-xl w-full">
 
             <div className="flex items-center gap-1.5 flex-wrap">
               {/* Standalone + Button */}
@@ -418,7 +418,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({
             <div className="flex items-center gap-1.5">
               <button
                 onClick={toggleMic}
-                className={`w-8 h-8 flex items-center justify-center rounded-xl border transition-all ${
+                className={`w-8 h-8 flex items-center justify-center rounded-lg border transition-all ${
                   isListening
                     ? "bg-rose-100 dark:bg-rose-950/80 border-rose-300 text-rose-600 dark:text-rose-400 animate-pulse"
                     : "bg-white dark:bg-zinc-900 border-gray-200 dark:border-zinc-700 text-gray-600 dark:text-zinc-300 hover:bg-gray-50 dark:hover:bg-zinc-800"
@@ -432,7 +432,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({
                 <button
                   type="button"
                   onClick={onStop}
-                  className="relative w-8 h-8 flex items-center justify-center rounded-xl bg-gray-200/90 dark:bg-zinc-700/80 border border-gray-300/80 dark:border-zinc-600/80 transition-all cursor-pointer hover:bg-gray-300/80 dark:hover:bg-zinc-600/80 active:scale-95 group shrink-0"
+                  className="relative w-8 h-8 flex items-center justify-center rounded-lg bg-gray-200/90 dark:bg-zinc-700/80 border border-gray-300/80 dark:border-zinc-600/80 transition-all cursor-pointer hover:bg-gray-300/80 dark:hover:bg-zinc-600/80 active:scale-95 group shrink-0"
                   title={t("停止生成", "Stop Generation")}
                 >
                   {/* Outer Rotating Arc */}
@@ -465,7 +465,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({
                 <button
                   onClick={handleSubmit}
                   disabled={!inputText.trim() && contextPills.length === 0}
-                  className={`w-8 h-8 flex items-center justify-center rounded-xl transition-all shrink-0 border ${
+                  className={`w-8 h-8 flex items-center justify-center rounded-lg transition-all shrink-0 border ${
                     inputText.trim() || contextPills.length > 0
                       ? "bg-white text-black border-gray-300 dark:bg-zinc-900 dark:text-white dark:border-zinc-700 hover:bg-gray-50 dark:hover:bg-zinc-800 shadow-xs cursor-pointer active:scale-95"
                       : "bg-white/80 text-gray-300 border-gray-200 dark:bg-zinc-900/50 dark:text-zinc-600 dark:border-zinc-800 cursor-not-allowed"
@@ -480,7 +480,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({
         </div>
 
         {/* Sub Status Bar */}
-        <div className="px-4 py-2 bg-gray-50/90 dark:bg-zinc-900/90 border-t border-gray-100 dark:border-zinc-800 rounded-b-2xl flex items-center justify-between text-[11px] text-gray-500 dark:text-zinc-400 select-none">
+        <div className="px-4 py-2 bg-gray-50/90 dark:bg-zinc-900/90 border-t border-gray-100 dark:border-zinc-800 rounded-b-xl flex items-center justify-between text-[11px] text-gray-500 dark:text-zinc-400 select-none">
           {/* Left Sub Items */}
           <div className="flex items-center gap-3">
             <button className="flex items-center gap-1 hover:text-gray-800 dark:hover:text-zinc-200 transition-colors">
@@ -549,7 +549,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 8, scale: 0.98 }}
             transition={{ duration: 0.12, ease: "easeOut" }}
-            className="absolute left-4 bottom-full mb-2 w-64 bg-white dark:bg-zinc-900 rounded-xl shadow-xl border border-gray-200 dark:border-zinc-800 py-1.5 z-50 text-xs font-sans"
+            className="absolute left-4 bottom-full mb-2 w-64 bg-white dark:bg-zinc-900 rounded-lg shadow-xl border border-gray-200 dark:border-zinc-800 py-1.5 z-50 text-xs font-sans"
           >
             <div className="px-3 py-1 text-[10px] font-semibold text-gray-400 dark:text-zinc-500 uppercase tracking-wider">
               {t("@ 引用上下文", "@ Reference Context")}
@@ -591,7 +591,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 8, scale: 0.98 }}
             transition={{ duration: 0.12, ease: "easeOut" }}
-            className="absolute left-4 bottom-full mb-2 w-64 bg-white dark:bg-zinc-900 rounded-xl shadow-xl border border-gray-200 dark:border-zinc-800 py-1.5 z-50 text-xs font-sans"
+            className="absolute left-4 bottom-full mb-2 w-64 bg-white dark:bg-zinc-900 rounded-lg shadow-xl border border-gray-200 dark:border-zinc-800 py-1.5 z-50 text-xs font-sans"
           >
             <div className="px-3 py-1 text-[10px] font-semibold text-gray-400 dark:text-zinc-500 uppercase tracking-wider">
               {t("/ 调起指令", "/ Trigger Commands")}
