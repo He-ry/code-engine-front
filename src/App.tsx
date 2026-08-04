@@ -27,7 +27,7 @@ import {
 } from "./lib/agentClient";
 import { listProjects, createProject } from "./lib/projectApi";
 import { DEFAULT_CHAT_MESSAGES, EN_DEFAULT_CHAT_MESSAGES } from "./data/mockData";
-import { Project, ChatMessage, ContextPill, FileNode, OpenTab, ToolExecution } from "./types";
+import { Project, ChatMessage, ContextPill, FileNode, OpenTab, ToolExecution, ThinkingProcess } from "./types";
 import { Folder, ChevronDown, Sparkles, Check, Globe, Languages, ShieldAlert, ShieldCheck, ShieldX } from "lucide-react";
 
 const getInitialProjectId = () => {
@@ -554,23 +554,74 @@ export default function App() {
         const delta = data.delta || "";
         if (!delta) break;
         setMessages((prev) =>
-          prev.map((m) =>
-            m.id === aiMsgId
-              ? {
-                  ...m,
-                  agentStatus: "thinking",
-                  thinkingProcess: {
-                    ...(m.thinkingProcess || { thoughtText: "", isCollapsed: false }),
-                    thoughtText: (m.thinkingProcess?.thoughtText || "") + delta,
-                  },
-                }
-              : m
-          )
+          prev.map((m) => {
+            if (m.id !== aiMsgId) return m;
+
+            let list: ThinkingProcess[] = m.thinkingProcesses
+              ? [...m.thinkingProcesses]
+              : m.thinkingProcess
+              ? [{ ...m.thinkingProcess }]
+              : [];
+
+            const lastBlock = list[list.length - 1];
+            const toolsExist = Boolean(m.toolExecutions && m.toolExecutions.length > 0);
+            const lastToolTime = toolsExist ? (m.toolExecutions![m.toolExecutions!.length - 1].createdAt || 0) : 0;
+            const lastBlockTime = lastBlock ? (lastBlock.createdAt || 0) : 0;
+
+            // If no block exists, or tools were executed after the last block started, start a new distinct block
+            if (!lastBlock || (toolsExist && lastToolTime > lastBlockTime && lastBlock.thoughtText.trim().length > 0)) {
+              list.push({
+                id: `tp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                thoughtText: delta,
+                isCollapsed: false,
+                createdAt: Date.now(),
+              });
+            } else {
+              list[list.length - 1] = {
+                ...lastBlock,
+                thoughtText: lastBlock.thoughtText + delta,
+              };
+            }
+
+            return {
+              ...m,
+              agentStatus: "thinking",
+              thinkingProcesses: list,
+              thinkingProcess: list[0], // fallback sync
+            };
+          })
         );
         break;
       }
       case "reasoning_part_added": {
-        // Optional section separator — ChatStream renders a continuous panel.
+        setMessages((prev) =>
+          prev.map((m) => {
+            if (m.id !== aiMsgId) return m;
+            const list: ThinkingProcess[] = m.thinkingProcesses
+              ? [...m.thinkingProcesses]
+              : m.thinkingProcess
+              ? [{ ...m.thinkingProcess }]
+              : [];
+
+            if (list.length > 0 && !list[list.length - 1].thoughtText.trim()) {
+              return m;
+            }
+
+            const newBlock: ThinkingProcess = {
+              id: `tp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              thoughtText: "",
+              isCollapsed: false,
+              createdAt: Date.now(),
+            };
+
+            const updated = [...list, newBlock];
+            return {
+              ...m,
+              thinkingProcesses: updated,
+              thinkingProcess: updated[0],
+            };
+          })
+        );
         break;
       }
       case "item_started": {
@@ -581,6 +632,7 @@ export default function App() {
             name: item.tool || item.toolName || "tool",
             command: item.command || "",
             status: "running",
+            createdAt: Date.now(),
           };
           setMessages((prev) =>
             prev.map((m) =>

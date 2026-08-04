@@ -103,6 +103,7 @@ export interface ToolExecution {
   result?: string;
   duration?: string;
   autoExecute?: boolean;
+  createdAt?: number;
 }
 
 export interface ClarificationQuestion {
@@ -120,9 +121,11 @@ export interface ClarificationQuestion {
 }
 
 export interface ThinkingProcess {
+  id?: string;
   durationSec?: number;
   thoughtText: string;
   isCollapsed?: boolean;
+  createdAt?: number;
 }
 
 export interface ChatMessage {
@@ -136,6 +139,7 @@ export interface ChatMessage {
   codeSnippets?: { filename: string; code: string; language: string }[];
   toolLogs?: string[];
   thinkingProcess?: ThinkingProcess;
+  thinkingProcesses?: ThinkingProcess[];
   toolExecutions?: ToolExecution[];
   clarificationQuestions?: ClarificationQuestion[];
   agentStatus?: "thinking" | "executing_tool" | "asking_clarification" | "generating" | "completed";

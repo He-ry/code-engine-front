@@ -2,13 +2,15 @@ import React, { useState, useRef, useEffect } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useSettings } from "../context/SettingsContext";
-import { ChatMessage } from "../types";
+import { ChatMessage, ToolExecution, ThinkingProcess } from "../types";
 import { CodeBlock } from "./CodeBlock";
 import { ToolInvocationCard } from "./ToolInvocationCard";
 import { ToolExecutionGroup } from "./ToolExecutionGroup";
+import { ThinkingLoader } from "./ThinkingLoader";
 import {
   Copy,
   Check,
+  X,
   ThumbsUp,
   ThumbsDown,
   Clock,
@@ -180,45 +182,121 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
         }
 
         // Assistant Message - Left aligned
+        const thoughtsList: ThinkingProcess[] = msg.thinkingProcesses && msg.thinkingProcesses.length > 0
+          ? msg.thinkingProcesses
+          : msg.thinkingProcess
+          ? [msg.thinkingProcess]
+          : [];
+
+        const hasMultipleThoughts = thoughtsList.length > 1;
+
+        // Construct timeline items for ordered rendering
+        const timelineItems = (() => {
+          const tools = msg.toolExecutions || [];
+          const hasTimestamps =
+            thoughtsList.some((t) => t.createdAt != null) ||
+            tools.some((t) => t.createdAt != null);
+
+          if (!hasTimestamps) {
+            return [
+              ...thoughtsList.map((tp, idx) => ({
+                type: "thought" as const,
+                tp,
+                idx,
+                key: tp.id || `${msg.id}-thought-${idx}`,
+              })),
+              ...(tools.length > 0
+                ? [{ type: "tools" as const, tools, key: `${msg.id}-tools` }]
+                : []),
+            ];
+          }
+
+          type TimelineItem =
+            | { type: "thought"; tp: ThinkingProcess; idx: number; key: string; time: number }
+            | { type: "tools"; tools: ToolExecution[]; key: string; time: number };
+
+          const items: TimelineItem[] = [];
+
+          thoughtsList.forEach((tp, idx) => {
+            items.push({
+              type: "thought",
+              tp,
+              idx,
+              key: tp.id || `${msg.id}-thought-${idx}`,
+              time: tp.createdAt || 0,
+            });
+          });
+
+          if (tools.length > 0) {
+            items.push({
+              type: "tools",
+              tools,
+              key: `${msg.id}-tools`,
+              time: tools[0]?.createdAt || 0,
+            });
+          }
+
+          items.sort((a, b) => a.time - b.time);
+          return items;
+        })();
+
         return (
           <div key={msg.id} className="group flex flex-col items-start w-full space-y-3">
-            {/* 1. AGENT WORKING MODE: Thinking Process (思考过程 - 完全匹配图2极简风) */}
-            {msg.thinkingProcess && (
-              <div className="w-full text-xs transition-all font-sans">
-                {/* Thinking Toggle Header */}
-                <button
-                  onClick={() => toggleThought(msg.id)}
-                  className="flex items-center gap-1.5 text-xs text-gray-400 dark:text-zinc-500 hover:text-gray-600 dark:hover:text-zinc-300 cursor-pointer select-none py-0.5 transition-colors font-sans"
-                >
-                  {isThoughtCollapsed ? (
-                    <ChevronRight className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500" />
-                  ) : (
-                    <ChevronDown className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500" />
-                  )}
-                  <span className="font-sans text-xs tracking-tight">Thinking</span>
-                  {msg.thinkingProcess.durationSec && (
-                    <span className="text-[11px] text-gray-400 dark:text-zinc-500 font-mono opacity-80">
-                      ({msg.thinkingProcess.durationSec}s)
-                    </span>
-                  )}
-                </button>
+            {/* Render Thinking Blocks and Tool Executions */}
+            {timelineItems.map((item) => {
+              if (item.type === "thought") {
+                const isThoughtCollapsed =
+                  collapsedThoughts[item.key] ?? (item.tp.isCollapsed ?? false);
 
-                {/* Thinking Body */}
-                {!isThoughtCollapsed && (
-                  <div className="mt-1.5 pl-3 border-l border-gray-200 dark:border-zinc-800/80 text-xs text-gray-500 dark:text-zinc-400 leading-relaxed font-sans space-y-1 py-0.5 whitespace-pre-wrap">
-                    {msg.thinkingProcess.thoughtText}
+                return (
+                  <div key={item.key} className="w-full text-xs transition-all font-sans">
+                    {/* Thinking Toggle Header */}
+                    <button
+                      onClick={() => toggleThought(item.key)}
+                      className="flex items-center gap-1.5 text-xs text-gray-400 dark:text-zinc-500 hover:text-gray-600 dark:hover:text-zinc-300 cursor-pointer select-none py-0.5 transition-colors font-sans"
+                    >
+                      {isThoughtCollapsed ? (
+                        <ChevronRight className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500" />
+                      ) : (
+                        <ChevronDown className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500" />
+                      )}
+                      <span className="font-sans text-xs tracking-tight">
+                        {hasMultipleThoughts ? `${t("思考", "Thinking")} (#${item.idx + 1})` : t("思考过程", "Thinking")}
+                      </span>
+                      {item.tp.durationSec && (
+                        <span className="text-[11px] text-gray-400 dark:text-zinc-500 font-mono opacity-80">
+                          ({item.tp.durationSec}s)
+                        </span>
+                      )}
+                    </button>
+
+                    {/* Thinking Body */}
+                    {!isThoughtCollapsed && (
+                      <div className="mt-1.5 pl-3 border-l border-gray-200 dark:border-zinc-800/80 text-xs text-gray-500 dark:text-zinc-400 leading-relaxed font-sans space-y-1 py-0.5 whitespace-pre-wrap">
+                        {item.tp.thoughtText}
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
-            )}
+                );
+              }
 
-            {/* 2. AGENT WORKING MODE: Tool Executions (仿照 IDE Agent 优雅折叠日志) */}
-            {((msg.toolExecutions && msg.toolExecutions.length > 0) || (msg.toolLogs && msg.toolLogs.length > 0)) && (
-              <div className="w-full">
-                {msg.toolExecutions && msg.toolExecutions.length > 0 ? (
-                  <ToolExecutionGroup tools={msg.toolExecutions} />
-                ) : (
-                  msg.toolLogs?.map((log, idx) => (
+              if (item.type === "tools") {
+                return (
+                  <div key={item.key} className="w-full">
+                    <ToolExecutionGroup tools={item.tools} />
+                  </div>
+                );
+              }
+
+              return null;
+            })}
+
+            {/* Fallback Tool Logs if no toolExecutions */}
+            {(!msg.toolExecutions || msg.toolExecutions.length === 0) &&
+              msg.toolLogs &&
+              msg.toolLogs.length > 0 && (
+                <div className="w-full">
+                  {msg.toolLogs.map((log, idx) => (
                     <div
                       key={idx}
                       className="flex items-center gap-2 text-gray-600 dark:text-zinc-400 py-0.5 text-xs font-mono"
@@ -226,10 +304,9 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
                       <Terminal className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 shrink-0" />
                       <span>{log}</span>
                     </div>
-                  ))
-                )}
-              </div>
-            )}
+                  ))}
+                </div>
+              )}
 
             {/* 3. Main AI Text Content */}
             <div className="text-[13px] leading-relaxed text-gray-800 dark:text-zinc-200 w-full font-sans space-y-1">
@@ -562,153 +639,87 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
         );
       })}
 
-      {/* 4.5. Tool Approval Cohesive Bar — matching the exact horizontal bar layout from the screenshot */}
-      {(() => {
-        if (!pendingApproval) return null;
-        const tool = pendingApproval.toolName || "";
+      {/* 4.5. Tool Approval Pending Card - Rendered directly inside standard Execute ToolInvocationCard */}
+      {pendingApproval && (() => {
+        const toolName = pendingApproval.toolName || "Execute";
         const args = pendingApproval.arguments || {};
 
-        let title = t("工具执行待审核", "Tool action pending approval");
-        let badgeText = "";
-        let badgeColor = "text-emerald-500 dark:text-emerald-400";
-        let fileName = "";
-        let dirPath = "";
-        let cmdLine = "";
-        let isFileAction = false;
-        let isCommandAction = false;
+        let name = "Execute";
+        let command = "";
+        let description = "";
 
-        if (tool.includes("file") || tool.includes("write")) {
-          isFileAction = true;
-          const filePath = args.TargetFile || args.AbsolutePath || args.Path || "";
-          if (filePath) {
-            const parts = filePath.split("/");
-            fileName = parts.pop() || "";
-            dirPath = parts.join("/");
-          }
-
-          let lines = 0;
-          if (args.ReplacementContent) {
-            lines = args.ReplacementContent.split("\n").length;
-          } else if (args.Content) {
-            lines = args.Content.split("\n").length;
-          } else if (args.ReplacementChunks && Array.isArray(args.ReplacementChunks)) {
-            lines = args.ReplacementChunks.reduce(
-              (acc: number, chunk: any) => acc + (chunk.ReplacementContent?.split("\n").length || 0),
-              0
-            );
-          }
-
-          if (lines > 0) {
-            badgeText = `+${lines}`;
-          }
-
-          if (tool.includes("create") || tool.includes("write")) {
-            title = t("新建 1 个文件", "Create 1 file");
-          } else if (tool.includes("delete")) {
-            title = t("删除 1 个文件", "Delete 1 file");
-            badgeColor = "text-rose-500 dark:text-rose-400";
-            if (lines > 0) badgeText = `-${lines}`;
-          } else {
-            title = t("已编辑 1 个文件", "Edited 1 file");
-          }
-        } else if (tool.includes("command") || tool.includes("run")) {
-          isCommandAction = true;
-          cmdLine = args.CommandLine || "";
-          dirPath = args.Cwd || ".";
-          title = t("执行终端命令", "Execute terminal command");
-          badgeText = "exec";
-          badgeColor = "text-blue-500 dark:text-blue-400";
+        if (
+          toolName.includes("file") ||
+          toolName.includes("write") ||
+          toolName.includes("edit") ||
+          toolName.includes("create")
+        ) {
+          name = toolName.includes("create")
+            ? "Create File"
+            : toolName.includes("delete")
+            ? "Delete File"
+            : "Edit File";
+          command = args.TargetFile || args.AbsolutePath || args.Path || "";
+          description = command;
+        } else if (
+          toolName.includes("command") ||
+          toolName.includes("run") ||
+          toolName.includes("exec")
+        ) {
+          name = "Execute";
+          command = args.CommandLine || "";
+          description = command;
+        } else if (toolName.includes("package") || toolName.includes("install")) {
+          name = "Install Package";
+          const pkgs = Array.isArray(args.PackageNames)
+            ? args.PackageNames.join(" ")
+            : args.PackageNames || "";
+          command = `npm install ${pkgs}`;
+          description = command;
+        } else {
+          name = toolName;
+          command = typeof args === "string" ? args : JSON.stringify(args);
+          description = command;
         }
 
-        return (
-          <div className="w-full !mt-2 rounded-xl border border-gray-200 dark:border-zinc-850 bg-[#f0f0f0] dark:bg-zinc-900/30 overflow-hidden shadow-2xs font-sans text-xs sm:text-sm animate-in fade-in slide-in-from-bottom-2 duration-200">
-            {/* Top Row: Title, Badge, Action Buttons */}
-            <div className="px-4 py-2.5 bg-[#e4e4e7] dark:bg-zinc-900/40 flex items-center justify-between">
-              <div className="flex items-center gap-1.5 select-none">
-                <span className="font-semibold text-gray-800 dark:text-zinc-200 text-[13px]">
-                  {title}
-                </span>
-                {badgeText && (
-                  <span className={`font-mono text-[12px] font-bold ${badgeColor} ml-0.5`}>
-                    {badgeText}
-                  </span>
-                )}
-              </div>
-              <div className="flex items-center gap-4">
-                <button
-                  onClick={() => onApproval?.(false)}
-                  className="flex items-center gap-1 text-xs text-gray-500 hover:text-rose-600 dark:text-zinc-400 dark:hover:text-rose-400 transition-colors cursor-pointer font-medium"
-                >
-                  {t("撤销 ↶", "Undo ↶")}
-                </button>
-                <button
-                  onClick={() => onApproval?.(true)}
-                  className="bg-[#7a8da5] hover:bg-[#687b93] text-white rounded-[4px] px-3.5 py-1 text-xs font-semibold cursor-pointer shadow-2xs transition-colors"
-                >
-                  {t("审核", "Approve")}
-                </button>
-              </div>
-            </div>
+        const pendingToolExecution: ToolExecution = {
+          id: "pending-approval-tool",
+          name,
+          command,
+          description,
+          args: typeof args === "string" ? args : JSON.stringify(args),
+          status: "pending",
+        };
 
-            {/* Bottom Row: Detailed Context (File or Command detail) */}
-            {(isFileAction || isCommandAction) && (
-              <div className="px-4 py-3 bg-[#e4e4e7]/50 dark:bg-zinc-950/20 border-t border-gray-200/50 dark:border-zinc-800/50 flex items-center justify-between text-xs">
-                <div className="flex items-center gap-2 overflow-hidden mr-3">
-                  {isFileAction ? (
-                    <svg className="w-3.5 h-3.5 text-blue-500 shrink-0 select-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
-                    </svg>
-                  ) : (
-                    <svg className="w-3.5 h-3.5 text-emerald-500 shrink-0 select-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                    </svg>
-                  )}
-                  {isFileAction ? (
-                    <div className="flex items-baseline gap-1.5 overflow-hidden">
-                      <span className="font-semibold text-gray-700 dark:text-zinc-300 font-mono truncate max-w-[200px] sm:max-w-xs">
-                        {fileName}
-                      </span>
-                      {dirPath && (
-                        <span className="text-gray-400 dark:text-zinc-500 font-mono text-[10.5px] truncate max-w-[250px] sm:max-w-md">
-                          {dirPath}/{fileName}
-                        </span>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="flex items-baseline gap-1.5 overflow-hidden">
-                      <span className="font-semibold text-gray-700 dark:text-zinc-300 font-mono truncate max-w-[250px] sm:max-w-md">
-                        {cmdLine}
-                      </span>
-                      {dirPath && (
-                        <span className="text-gray-400 dark:text-zinc-500 font-mono text-[10.5px] truncate max-w-[120px]">
-                          Cwd: {dirPath}
-                        </span>
-                      )}
-                    </div>
-                  )}
-                </div>
-                {badgeText && (
-                  <span className={`font-mono text-[11px] font-semibold ${badgeColor} select-none shrink-0`}>
-                    {badgeText}
-                  </span>
-                )}
-              </div>
-            )}
-          </div>
+        return (
+          <ToolInvocationCard
+            tool={pendingToolExecution}
+            onExecute={() => onApproval?.(true)}
+            onReject={() => onApproval?.(false)}
+          />
         );
       })()}
 
       {/* 5. Active Generating / Streaming Agent Status */}
-      {isGenerating && !pendingApproval && (
-        <div className="flex items-center gap-2.5 pl-3.5 py-2 text-xs text-gray-500 dark:text-zinc-400 font-sans animate-in fade-in duration-200 select-none">
-          <div className="flex gap-1 items-center py-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 dark:bg-zinc-500 animate-bounce" style={{ animationDelay: "0ms" }} />
-            <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 dark:bg-zinc-500 animate-bounce" style={{ animationDelay: "150ms" }} />
-            <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 dark:bg-zinc-500 animate-bounce" style={{ animationDelay: "300ms" }} />
-          </div>
-          <span className="font-medium tracking-wide">{t("AI 思考中...", "AI is thinking...")}</span>
-        </div>
-      )}
+      {(() => {
+        const lastMsg = messages[messages.length - 1];
+        const hasActiveOutput =
+          lastMsg &&
+          lastMsg.sender === "ai" &&
+          (Boolean(lastMsg.text && lastMsg.text.trim().length > 0) ||
+            Boolean(lastMsg.toolExecutions && lastMsg.toolExecutions.length > 0) ||
+            Boolean(
+              (lastMsg.thinkingProcesses && lastMsg.thinkingProcesses.length > 0) ||
+              (lastMsg.thinkingProcess &&
+                lastMsg.thinkingProcess.thoughtText &&
+                lastMsg.thinkingProcess.thoughtText.trim().length > 0)
+            ));
+
+        if (isGenerating && !pendingApproval && !hasActiveOutput) {
+          return <ThinkingLoader t={t} />;
+        }
+        return null;
+      })()}
     </div>
   );
 };
