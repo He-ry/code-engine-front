@@ -10,6 +10,28 @@ export interface Project {
   branch?: string;
   conversations?: Conversation[];
   isActive?: boolean;
+  // from backend
+  rootPath?: string;
+  gitRemote?: string;
+  gitBranch?: string;
+  description?: string;
+  threadCount?: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface ProjectCreateInput {
+  name: string;
+  gitUrl?: string;
+  gitBranch?: string;
+  description?: string;
+}
+
+export interface ProjectUpdateInput {
+  name?: string;
+  gitRemote?: string;
+  gitBranch?: string;
+  description?: string;
 }
 
 export interface ContextPill {
@@ -47,6 +69,28 @@ export interface FileNode {
   status?: string; // 'U', 'M', etc.
   children?: FileNode[];
   content?: string;
+  size?: number;
+  modifiedAt?: string;
+}
+
+export interface FileListEntry {
+  name: string;
+  path: string;
+  type: "folder" | "file";
+  size?: number | null;
+  modified_at?: string | null;
+}
+
+export interface FileListResponse {
+  path: string;
+  entries: FileListEntry[];
+}
+
+export interface FileReadResponse {
+  path: string;
+  content: string;
+  size: number;
+  modified_at?: string | null;
 }
 
 export interface ToolExecution {

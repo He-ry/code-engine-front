@@ -57,15 +57,19 @@ export async function createThread(
   baseUrl: string,
   token: string,
   modelId: string,
-  name = "New Chat"
+  name = "New Chat",
+  projectId?: string
 ): Promise<ThreadInfo> {
+  const body: Record<string, string> = { model_id: modelId, name };
+  if (projectId) body.project_id = projectId;
+
   const res = await apiFetch(`${baseUrl}/api/chat/threads`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,
     },
-    body: JSON.stringify({ model_id: modelId, name }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(await detail(res));
   const json = await res.json();
@@ -77,9 +81,16 @@ export async function createThread(
   };
 }
 
-/** List the user's threads. */
-export async function listThreads(baseUrl: string, token: string): Promise<any[]> {
-  const res = await apiFetch(`${baseUrl}/api/chat/threads`, {
+/** List the user's threads. Optionally filter by project_id. */
+export async function listThreads(
+  baseUrl: string,
+  token: string,
+  projectId?: string
+): Promise<any[]> {
+  let url = `${baseUrl}/api/chat/threads`;
+  if (projectId) url += `?project_id=${encodeURIComponent(projectId)}`;
+
+  const res = await apiFetch(url, {
     headers: { Authorization: `Bearer ${token}` },
   });
   if (!res.ok) throw new Error(await detail(res));

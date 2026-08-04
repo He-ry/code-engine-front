@@ -25,7 +25,8 @@ import {
   respondInput,
   interruptTurn,
 } from "./lib/agentClient";
-import { DEFAULT_PROJECTS, DEFAULT_CHAT_MESSAGES, EN_DEFAULT_CHAT_MESSAGES } from "./data/mockData";
+import { listProjects, createProject } from "./lib/projectApi";
+import { DEFAULT_CHAT_MESSAGES, EN_DEFAULT_CHAT_MESSAGES } from "./data/mockData";
 import { Project, ChatMessage, ContextPill, FileNode, OpenTab, ToolExecution } from "./types";
 import { Folder, ChevronDown, Sparkles, Check, Globe, Languages, ShieldAlert, ShieldCheck, ShieldX } from "lucide-react";
 
@@ -34,7 +35,7 @@ const getInitialProjectId = () => {
   if (match && match.params.projectId) {
     return match.params.projectId;
   }
-  return "blackbox";
+  return "";  // will be set after projects load
 };
 
 const getInitialSettingsState = () => {
@@ -53,7 +54,8 @@ const getInitialSettingsState = () => {
 
 export default function App() {
   const { t, language, isLangSwitching, isThemeSwitching, theme, isLoggedIn, user, backendApiUrl, login, backendModels, defaultModel } = useSettings();
-  const [projects, setProjects] = useState<Project[]>(DEFAULT_PROJECTS);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [projectsLoading, setProjectsLoading] = useState(true);
   const initialProjectId = getInitialProjectId();
   const initialSettings = getInitialSettingsState();
   const [activeProjectId, setActiveProjectId] = useState<string>(initialProjectId);
@@ -191,7 +193,44 @@ export default function App() {
     }
   }, [location.pathname, location.search, login, navigate, backendApiUrl]);
 
-  // 1. Sync state FROM URL when URL changes
+  // 1. Load projects from backend
+  useEffect(() => {
+    if (!isLoggedIn) return;
+    const baseUrl = backendApiUrl || "https://agent.hery.cloud";
+    const token = user?.token;
+    if (!token) return;
+
+    listProjects(baseUrl, token)
+      .then((data) => {
+        // Map backend fields to frontend Project shape
+        const mapped: Project[] = (data || []).map((p: any) => ({
+          id: p.id,
+          name: p.name,
+          rootPath: p.root_path,
+          gitRemote: p.git_remote,
+          gitBranch: p.git_branch || p.branch,
+          description: p.description,
+          threadCount: p.thread_count,
+          conversations: [],
+          isActive: false,
+        }));
+        setProjects(mapped);
+        setProjectsLoading(false);
+
+        // If no active project is set yet, default to the first one
+        if (!activeProjectId && mapped.length > 0) {
+          const firstId = mapped[0].id;
+          setActiveProjectId(firstId);
+          navigate(`/project/${firstId}`, { replace: true });
+        }
+      })
+      .catch((err) => {
+        console.warn("Failed to load projects:", err);
+        setProjectsLoading(false);
+      });
+  }, [isLoggedIn, user?.token]);
+
+  // 2. Sync state FROM URL when URL changes
   useEffect(() => {
     // Match /project/:projectId
     const matchProject = matchPath(
@@ -355,11 +394,48 @@ export default function App() {
   };
 
   const activeProject =
-    projects.find((p) => p.id === activeProjectId) || projects[1];
+    projects.find((p) => p.id === activeProjectId) || projects[0] || { id: "", name: "No Project", branch: "main" };
 
   // New task action
   const handleNewTask = () => {
     setMessages([]);
+    threadIdRef.current = null;
+  };
+
+  // Create project
+  const handleCreateProject = async (name: string, gitUrl?: string) => {
+    const baseUrl = backendApiUrl || "https://agent.hery.cloud";
+    const token = user?.token || "";
+    try {
+      const p: any = await createProject(baseUrl, token, {
+        name,
+        gitUrl: gitUrl || undefined,
+      });
+      const mapped: Project = {
+        id: p.id,
+        name: p.name,
+        rootPath: p.root_path || p.rootPath,
+        gitRemote: p.git_remote || p.gitRemote,
+        gitBranch: p.git_branch || p.gitBranch || "main",
+        conversations: [],
+      };
+      setProjects((prev) => [...prev, mapped]);
+      setActiveProjectId(mapped.id);
+      setMessages([]);
+      threadIdRef.current = null;
+      navigate(`/project/${mapped.id}`);
+    } catch (err: any) {
+      console.warn("Failed to create project:", err);
+      window.dispatchEvent(
+        new CustomEvent("app:show_toast", {
+          detail: {
+            type: "error",
+            title: t("创建项目失败", "Failed to create project"),
+            description: err?.message || String(err),
+          },
+        })
+      );
+    }
   };
 
   // Open file in editor tab
@@ -715,7 +791,7 @@ export default function App() {
       // 1. Ensure a thread exists (reuse across turns).
       let threadId = threadIdRef.current;
       if (!threadId) {
-        const created = await createThread(baseUrl, token, modelId, activeProject.name || "New Chat");
+        const created = await createThread(baseUrl, token, modelId, activeProject.name || "New Chat", activeProjectId);
         threadId = created.threadId;
         threadIdRef.current = threadId;
       }
@@ -937,12 +1013,14 @@ export default function App() {
           activeProjectId={activeProjectId}
           onSelectProject={(id) => {
             setMessages([]);
+            threadIdRef.current = null;
             setActiveProjectId(id);
             if (!isSettingsOpen) {
               navigate(`/project/${id}`);
             }
           }}
           onNewTask={handleNewTask}
+          onCreateProject={handleCreateProject}
           pinned={sidebarPinned}
           isOpen={isSidebarOpen}
           onTogglePin={() => setSidebarPinned(!sidebarPinned)}
@@ -1194,6 +1272,7 @@ export default function App() {
               onOpenFile={handleOpenFile}
               onOpenBrowserTab={handleOpenBrowserTab}
               projectName={activeProject.name}
+              projectId={activeProjectId || undefined}
               width={rightPanelWidth}
             />
           </div>

@@ -80,6 +80,7 @@ interface SidebarProps {
   activeProjectId: string;
   onSelectProject: (id: string) => void;
   onNewTask: () => void;
+  onCreateProject?: (name: string, gitUrl?: string) => void;
   pinned: boolean;
   isOpen: boolean;
   onTogglePin?: () => void;
@@ -93,6 +94,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   activeProjectId,
   onSelectProject,
   onNewTask,
+  onCreateProject,
   pinned,
   isOpen,
   onTogglePin,
@@ -100,14 +102,51 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onMouseEnter,
   onMouseLeave,
 }) => {
-  const { t, user, logout } = useSettings();
+  const { t, user, logout, backendApiUrl } = useSettings();
   const [projectSearch, setProjectSearch] = useState("");
   const [showSearchInput, setShowSearchInput] = useState(false);
   const [isProjectsSectionExpanded, setIsProjectsSectionExpanded] = useState(true);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+  const [showNewProjectInput, setShowNewProjectInput] = useState(false);
+  const [newProjectName, setNewProjectName] = useState("");
+  const [newProjectGitUrl, setNewProjectGitUrl] = useState("");
   const [expandedProjects, setExpandedProjects] = useState<Record<string, boolean>>({
     [activeProjectId]: true,
   });
+  const [projectThreads, setProjectThreads] = useState<Record<string, any[]>>({});
+
+  const handleCreateProject = () => {
+    const name = newProjectName.trim();
+    if (!name) return;
+    onCreateProject?.(name, newProjectGitUrl.trim() || undefined);
+    setNewProjectName("");
+    setNewProjectGitUrl("");
+    setShowNewProjectInput(false);
+  };
+
+  // Load threads when a project is expanded
+  const loadProjectThreads = async (projectId: string) => {
+    if (projectThreads[projectId]) return; // already loaded
+    const baseUrl = backendApiUrl || "https://agent.hery.cloud";
+    const token = user?.token || "";
+    if (!token) return;
+    try {
+      const { listThreads } = await import("../lib/agentClient");
+      const threads = await listThreads(baseUrl, token, projectId);
+      setProjectThreads((prev) => ({ ...prev, [projectId]: threads }));
+    } catch {
+      // silently fail — conversations are optional UI
+    }
+  };
+
+  // Load threads when a project becomes expanded
+  React.useEffect(() => {
+    for (const [projectId, isExpanded] of Object.entries(expandedProjects)) {
+      if (isExpanded) {
+        loadProjectThreads(projectId);
+      }
+    }
+  }, [expandedProjects]);
 
   const toggleProjectExpand = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -204,7 +243,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     <Search className="w-3.5 h-3.5" />
                   </button>
                   <button
-                    onClick={onNewTask}
+                    onClick={() => setShowNewProjectInput(!showNewProjectInput)}
                     className="p-1 hover:bg-gray-200/70 dark:hover:bg-zinc-800 rounded text-gray-500 dark:text-zinc-400 transition-colors"
                     title={t("新建项目", "New Project")}
                   >
@@ -229,6 +268,43 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     className="w-full text-xs px-2 py-1 bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-700 text-gray-800 dark:text-zinc-100 rounded focus:outline-none focus:ring-1 focus:ring-gray-300 dark:focus:ring-zinc-600"
                     autoFocus
                   />
+                </div>
+              )}
+
+              {showNewProjectInput && isProjectsSectionExpanded && (
+                <div className="px-2 my-1 space-y-1.5">
+                  <input
+                    type="text"
+                    placeholder={t("项目名称", "Project name")}
+                    value={newProjectName}
+                    onChange={(e) => setNewProjectName(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") handleCreateProject(); }}
+                    className="w-full text-xs px-2 py-1 bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-700 text-gray-800 dark:text-zinc-100 rounded focus:outline-none focus:ring-1 focus:ring-blue-400 dark:focus:ring-blue-600"
+                    autoFocus
+                  />
+                  <input
+                    type="text"
+                    placeholder={t("Git URL (可选)", "Git URL (optional)")}
+                    value={newProjectGitUrl}
+                    onChange={(e) => setNewProjectGitUrl(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") handleCreateProject(); }}
+                    className="w-full text-xs px-2 py-1 bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-700 text-gray-800 dark:text-zinc-100 rounded focus:outline-none focus:ring-1 focus:ring-gray-300 dark:focus:ring-zinc-600"
+                  />
+                  <div className="flex gap-1.5">
+                    <button
+                      onClick={handleCreateProject}
+                      disabled={!newProjectName.trim()}
+                      className="flex-1 py-1 rounded text-xs font-medium bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 dark:disabled:bg-zinc-700 text-white transition-colors cursor-pointer disabled:cursor-not-allowed"
+                    >
+                      {t("创建", "Create")}
+                    </button>
+                    <button
+                      onClick={() => { setShowNewProjectInput(false); setNewProjectName(""); setNewProjectGitUrl(""); }}
+                      className="px-2 py-1 rounded text-xs text-gray-500 dark:text-zinc-400 hover:bg-gray-200 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 </div>
               )}
 
@@ -308,24 +384,35 @@ export const Sidebar: React.FC<SidebarProps> = ({
                           </div>
                         </div>
 
-                        {/* Collapsible Details */}
+                        {/* Collapsible Details — conversations */}
                         {isExpanded && (
                           <div className="pl-8 pr-2 pb-2 text-xs text-gray-500 dark:text-zinc-400 space-y-0.5">
-                            {proj.conversations && proj.conversations.length > 0 ? (
-                              proj.conversations.map((conv) => (
+                            {(() => {
+                              const threads = projectThreads[proj.id];
+                              if (!threads) {
+                                return (
+                                  <div className="py-1 px-1.5 text-gray-400 dark:text-zinc-500 text-xs select-none">
+                                    {t("加载中...", "Loading...")}
+                                  </div>
+                                );
+                              }
+                              if (threads.length === 0) {
+                                return (
+                                  <div className="py-1 px-1.5 text-gray-400 dark:text-zinc-500 text-xs select-none">
+                                    {t("暂无对话", "No Conversations")}
+                                  </div>
+                                );
+                              }
+                              return threads.map((thread: any) => (
                                 <div
-                                  key={conv.id}
+                                  key={thread.id}
                                   className="flex items-center gap-1.5 py-1 px-1.5 hover:bg-gray-300/40 dark:hover:bg-zinc-800/80 rounded text-gray-700 dark:text-zinc-300 cursor-pointer transition-colors"
                                 >
                                   <MessageSquare className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 shrink-0" />
-                                  <span className="truncate">{conv.title}</span>
+                                  <span className="truncate">{thread.name || thread.last_message_preview || thread.id}</span>
                                 </div>
-                              ))
-                            ) : (
-                              <div className="py-1 px-1.5 text-gray-400 dark:text-zinc-500 text-xs select-none">
-                                {t("暂无对话", "No Conversations")}
-                              </div>
-                            )}
+                              ));
+                            })()}
                           </div>
                         )}
                       </div>

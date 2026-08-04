@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { useSettings } from "../context/SettingsContext";
 import {
@@ -19,9 +19,10 @@ import {
   Smartphone,
   ExternalLink,
   Code2,
+  Loader2,
 } from "lucide-react";
 import { FileNode } from "../types";
-import { FILE_TREE_BLACKBOX } from "../data/mockData";
+import { listFiles, readFile } from "../lib/projectApi";
 
 interface RightPanelProps {
   isOpen: boolean;
@@ -29,6 +30,7 @@ interface RightPanelProps {
   onOpenFile: (file: FileNode) => void;
   onOpenBrowserTab?: (url?: string) => void;
   projectName: string;
+  projectId?: string;
   width?: number;
 }
 
@@ -38,16 +40,17 @@ export const RightPanel: React.FC<RightPanelProps> = ({
   onOpenFile,
   onOpenBrowserTab,
   projectName,
+  projectId,
   width = 320,
 }) => {
-  const { t } = useSettings();
+  const { t, backendApiUrl, user } = useSettings();
   const [activeTab, setActiveTab] = useState<"explorer" | "search" | "git" | "browser">(
     "explorer"
   );
-  const [expandedFolders, setExpandedFolders] = useState<Record<string, boolean>>({
-    core: true,
-    fe: true,
-  });
+  const [expandedFolders, setExpandedFolders] = useState<Record<string, boolean>>({});
+  const [fileTree, setFileTree] = useState<Record<string, FileNode[]>>({});
+  const [loadingPaths, setLoadingPaths] = useState<Record<string, boolean>>({});
+  const [explorerError, setExplorerError] = useState<string | null>(null);
 
   // Browser state
   const [urlInput, setUrlInput] = useState("https://example.com");
@@ -55,29 +58,107 @@ export const RightPanel: React.FC<RightPanelProps> = ({
   const [browserMode, setBrowserMode] = useState<"mock" | "real">("mock");
   const [selectedElement, setSelectedElement] = useState<string | null>(null);
 
-  const toggleFolder = (path: string) => {
-    setExpandedFolders((prev) => ({ ...prev, [path]: !prev[path] }));
+  const baseUrl = backendApiUrl || "https://agent.hery.cloud";
+  const token = user?.token || "";
+
+  // Load files for a given path
+  const loadPath = useCallback(
+    async (path: string) => {
+      if (!projectId || !token) return;
+
+      let alreadyLoaded = false;
+      setFileTree((prev) => {
+        if (prev[path]) alreadyLoaded = true;
+        return prev;
+      });
+      if (alreadyLoaded) return;
+
+      setLoadingPaths((prev) => ({ ...prev, [path]: true }));
+      setExplorerError(null);
+      try {
+        const result = await listFiles(baseUrl, token, projectId, path);
+        const nodes: FileNode[] = result.entries.map((e) => ({
+          name: e.name,
+          type: e.type,
+          path: e.path,
+          size: e.size ?? undefined,
+          modifiedAt: e.modified_at ?? undefined,
+        }));
+        setFileTree((prev) => ({ ...prev, [path]: nodes }));
+      } catch (err: any) {
+        setExplorerError(err?.message || String(err));
+      } finally {
+        setLoadingPaths((prev) => ({ ...prev, [path]: false }));
+      }
+    },
+    [projectId, token, baseUrl]
+  );
+
+  // Load root when projectId changes or explorer tab becomes active
+  useEffect(() => {
+    if (isOpen && activeTab === "explorer" && projectId) {
+      setFileTree({});
+      setExpandedFolders({});
+      loadPath(".");
+    }
+  }, [isOpen, activeTab, projectId]);
+
+  const toggleFolder = async (path: string) => {
+    const isCurrentlyExpanded = expandedFolders[path];
+    if (!isCurrentlyExpanded) {
+      // Load children before expanding
+      await loadPath(path);
+    }
+    setExpandedFolders((prev) => ({ ...prev, [path]: !isCurrentlyExpanded }));
+  };
+
+  const handleFileClick = async (node: FileNode) => {
+    if (node.type === "folder") {
+      await toggleFolder(node.path);
+      return;
+    }
+    // Load file content
+    if (!projectId || !token) return;
+    try {
+      const result = await readFile(baseUrl, token, projectId, node.path);
+      const fileWithContent: FileNode = {
+        ...node,
+        content: result.content,
+        size: result.size,
+        modifiedAt: result.modified_at ?? undefined,
+      };
+      onOpenFile(fileWithContent);
+    } catch (err: any) {
+      console.warn("Failed to read file:", err);
+      // Still open the file even if read fails (may have cached content)
+      onOpenFile(node);
+    }
   };
 
   const renderFileNode = (node: FileNode, level = 0) => {
     const isFolder = node.type === "folder";
     const isExpanded = expandedFolders[node.path];
+    const children = fileTree[node.path];
+    const isLoading = loadingPaths[node.path];
 
     return (
       <div key={node.path} className="font-sans text-xs select-none">
         <div
           onClick={() => {
-            if (isFolder) toggleFolder(node.path);
-            else onOpenFile(node);
+            if (isFolder) {
+              toggleFolder(node.path);
+            } else {
+              handleFileClick(node);
+            }
           }}
           style={{ paddingLeft: `${level * 12 + 10}px` }}
-          className={`group flex items-center justify-between py-1 px-2 hover:bg-gray-100 dark:hover:bg-zinc-800/80 cursor-pointer text-gray-700 dark:text-zinc-300 transition-colors ${
-            !isFolder && node.path.includes("engine") ? "text-emerald-700 dark:text-emerald-400 font-medium" : ""
-          }`}
+          className={`group flex items-center justify-between py-1 px-2 hover:bg-gray-100 dark:hover:bg-zinc-800/80 cursor-pointer text-gray-700 dark:text-zinc-300 transition-colors`}
         >
           <div className="flex items-center gap-1.5 truncate">
             {isFolder ? (
-              isExpanded ? (
+              isLoading ? (
+                <Loader2 className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 shrink-0 animate-spin" />
+              ) : isExpanded ? (
                 <ChevronDown className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 shrink-0" />
               ) : (
                 <ChevronRight className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 shrink-0" />
@@ -100,8 +181,20 @@ export const RightPanel: React.FC<RightPanelProps> = ({
           </div>
         </div>
 
-        {isFolder && isExpanded && node.children && (
-          <div>{node.children.map((child) => renderFileNode(child, level + 1))}</div>
+        {isFolder && isExpanded && (
+          <div>
+            {isLoading && !children ? (
+              <div style={{ paddingLeft: `${(level + 1) * 12 + 10}px` }} className="py-1 text-gray-400 dark:text-zinc-500">
+                {t("加载中...", "Loading...")}
+              </div>
+            ) : children && children.length > 0 ? (
+              children.map((child) => renderFileNode(child, level + 1))
+            ) : (
+              <div style={{ paddingLeft: `${(level + 1) * 12 + 10}px` }} className="py-1 text-gray-400 dark:text-zinc-500">
+                {t("空文件夹", "Empty folder")}
+              </div>
+            )}
+          </div>
         )}
       </div>
     );
@@ -195,9 +288,29 @@ export const RightPanel: React.FC<RightPanelProps> = ({
           <div className="flex-1 overflow-y-auto py-2">
             <div className="px-3 py-1 text-[11px] font-bold text-gray-500 dark:text-zinc-400 tracking-wider uppercase flex items-center justify-between">
               <span>{projectName.toUpperCase()}</span>
+              {!projectId && (
+                <span className="text-[10px] text-amber-500 normal-case tracking-normal">
+                  {t("无项目", "No project")}
+                </span>
+              )}
             </div>
             <div className="mt-1">
-              {FILE_TREE_BLACKBOX.map((node) => renderFileNode(node))}
+              {explorerError ? (
+                <div className="px-3 py-2 text-xs text-red-500 dark:text-red-400">
+                  {explorerError}
+                </div>
+              ) : !projectId ? (
+                <div className="px-3 py-2 text-xs text-gray-400 dark:text-zinc-500">
+                  {t("请先选择一个项目", "Please select a project first")}
+                </div>
+              ) : fileTree["."] ? (
+                fileTree["."].map((node) => renderFileNode(node))
+              ) : loadingPaths["."] ? (
+                <div className="px-3 py-2 text-xs text-gray-400 dark:text-zinc-500 flex items-center gap-2">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  {t("加载文件树...", "Loading file tree...")}
+                </div>
+              ) : null}
             </div>
           </div>
         )}
