@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -30,6 +30,15 @@ export const ToolInvocationCard: React.FC<ToolInvocationCardProps> = ({
   const [autoExecute, setAutoExecute] = useState(tool.autoExecute || false);
   const [status, setStatus] = useState<ToolExecution["status"]>(tool.status);
   const [resultText, setResultText] = useState<string | null>(tool.result || null);
+
+  // Sync internal state when parent props change (e.g. SSE item_completed events).
+  useEffect(() => {
+    setStatus(tool.status);
+  }, [tool.status]);
+
+  useEffect(() => {
+    setResultText(tool.result || null);
+  }, [tool.result]);
 
   const handleExecuteClick = () => {
     setStatus("running");

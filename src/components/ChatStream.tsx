@@ -4,7 +4,6 @@ import remarkGfm from "remark-gfm";
 import { useSettings } from "../context/SettingsContext";
 import { ChatMessage, ToolExecution, ThinkingProcess } from "../types";
 import { CodeBlock } from "./CodeBlock";
-import { ToolInvocationCard } from "./ToolInvocationCard";
 import { ToolExecutionGroup } from "./ToolExecutionGroup";
 import { ThinkingLoader } from "./ThinkingLoader";
 import {
@@ -35,19 +34,19 @@ interface ChatStreamProps {
   messages: ChatMessage[];
   isGenerating: boolean;
   onSelectOption?: (questionId: string, optionValue: string, optionLabel: string) => void;
-  pendingApproval?: {
+  pendingApprovals?: Record<string, {
     approvalId: string;
     toolName: string;
     arguments: any;
-  } | null;
-  onApproval?: (approved: boolean) => void;
+  }>;
+  onApproval?: (approved: boolean, approvalId?: string) => void;
 }
 
 export const ChatStream: React.FC<ChatStreamProps> = ({
   messages,
   isGenerating,
   onSelectOption,
-  pendingApproval,
+  pendingApprovals,
   onApproval,
 }) => {
   const { t } = useSettings();
@@ -195,65 +194,70 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
           const rawTools = msg.toolExecutions || [];
           const tools = [...rawTools];
 
-          if (isLastMessage && pendingApproval) {
-            const approvalId = pendingApproval.approvalId;
-            const toolName = pendingApproval.toolName || "Execute";
-            const args = pendingApproval.arguments || {};
-            let name = "Execute";
-            let command = "";
-            if (
-              toolName.includes("file") ||
-              toolName.includes("write") ||
-              toolName.includes("edit") ||
-              toolName.includes("create")
-            ) {
-              name = toolName.includes("create")
-                ? "Create File"
-                : toolName.includes("delete")
-                ? "Delete File"
-                : "Edit File";
-              command = args.TargetFile || args.AbsolutePath || args.Path || "";
-            } else if (
-              toolName.includes("command") ||
-              toolName.includes("run") ||
-              toolName.includes("exec")
-            ) {
-              name = "Execute";
-              command = args.CommandLine || "";
-            } else if (toolName.includes("package") || toolName.includes("install")) {
-              name = "Install Package";
-              command = `npm install ${
-                Array.isArray(args.PackageNames)
-                  ? args.PackageNames.join(" ")
-                  : args.PackageNames || ""
-              }`;
-            } else {
-              name = toolName;
-              command = typeof args === "string" ? args : JSON.stringify(args);
-            }
+          // Merge all pending approvals into the tool list for the last message.
+          if (isLastMessage && pendingApprovals) {
+            for (const pendingApproval of Object.values(pendingApprovals)) {
+              const approvalId = pendingApproval.approvalId;
+              const toolName = pendingApproval.toolName || "Execute";
+              const args = pendingApproval.arguments || {};
+              let name = "Execute";
+              let command = "";
+              if (
+                toolName.includes("file") ||
+                toolName.includes("write") ||
+                toolName.includes("edit") ||
+                toolName.includes("create")
+              ) {
+                name = toolName.includes("create")
+                  ? "Create File"
+                  : toolName.includes("delete")
+                  ? "Delete File"
+                  : "Edit File";
+                command = args.TargetFile || args.AbsolutePath || args.Path || "";
+              } else if (
+                toolName.includes("command") ||
+                toolName.includes("run") ||
+                toolName.includes("exec")
+              ) {
+                name = "Execute";
+                command = args.CommandLine || "";
+              } else if (toolName.includes("package") || toolName.includes("install")) {
+                name = "Install Package";
+                command = `npm install ${
+                  Array.isArray(args.PackageNames)
+                    ? args.PackageNames.join(" ")
+                    : args.PackageNames || ""
+                }`;
+              } else {
+                name = toolName;
+                command = typeof args === "string" ? args : JSON.stringify(args);
+              }
 
-            const existingIdx = tools.findIndex(
-              (t) => (approvalId && t.id === approvalId) || t.status === "pending"
-            );
+              // Only match by exact approvalId — never use status wildcard
+              // to avoid overwriting unrelated server-streamed tools.
+              const existingIdx = approvalId
+                ? tools.findIndex((t) => t.id === approvalId)
+                : -1;
 
-            if (existingIdx >= 0) {
-              tools[existingIdx] = {
-                ...tools[existingIdx],
-                name: tools[existingIdx].name || name,
-                command: tools[existingIdx].command || command,
-                description: tools[existingIdx].description || command,
-                status: "pending",
-              };
-            } else {
-              tools.push({
-                id: approvalId || `pending-approval-${Date.now()}`,
-                name,
-                command,
-                description: command,
-                args: typeof args === "string" ? args : JSON.stringify(args),
-                status: "pending",
-                createdAt: Date.now(),
-              });
+              if (existingIdx >= 0) {
+                tools[existingIdx] = {
+                  ...tools[existingIdx],
+                  name: tools[existingIdx].name || name,
+                  command: tools[existingIdx].command || command,
+                  description: tools[existingIdx].description || command,
+                  status: "pending",
+                };
+              } else {
+                tools.push({
+                  id: approvalId || `pending-approval-${Date.now()}`,
+                  name,
+                  command,
+                  description: command,
+                  args: typeof args === "string" ? args : JSON.stringify(args),
+                  status: "pending",
+                  createdAt: Date.now(),
+                });
+              }
             }
           }
 
@@ -291,14 +295,19 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
             });
           });
 
-          tools.forEach((tool, toolIdx) => {
+          // Group all tools into a single timeline item so the group
+          // header counts correctly (e.g. "Executed 3 tools").
+          if (tools.length > 0) {
+            const earliestToolTime = Math.min(
+              ...tools.map((t) => t.createdAt || 0)
+            );
             items.push({
               type: "tools",
-              tools: [tool],
-              key: tool.id || `${msg.id}-tool-${toolIdx}`,
-              time: tool.createdAt || 0,
+              tools,
+              key: `${msg.id}-tools`,
+              time: earliestToolTime,
             });
-          });
+          }
 
           items.sort((a, b) => a.time - b.time);
           return items;
@@ -349,8 +358,8 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
                   <div key={item.key} className="w-full">
                     <ToolExecutionGroup
                       tools={item.tools}
-                      onExecuteTool={() => onApproval?.(true)}
-                      onRejectTool={() => onApproval?.(false)}
+                      onExecuteTool={(toolId) => onApproval?.(true, toolId)}
+                      onRejectTool={(toolId) => onApproval?.(false, toolId)}
                     />
                   </div>
                 );
@@ -655,7 +664,7 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
             )}
 
             {/* Action Icon Bar below AI response */}
-            {!(isLastMessage && (isGenerating || pendingApproval)) && (
+            {!(isLastMessage && (isGenerating || Object.keys(pendingApprovals || {}).length > 0)) && (
               <div
                 className={`flex items-center gap-2.5 pt-1 text-gray-400 dark:text-zinc-500 text-xs select-none transition-opacity duration-200 ${
                   isLiked ? "opacity-100" : "opacity-0 group-hover:opacity-100"
@@ -722,7 +731,7 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
                 lastMsg.thinkingProcess.thoughtText.trim().length > 0)
             ));
 
-        if (isGenerating && !pendingApproval && !hasActiveOutput) {
+        if (isGenerating && Object.keys(pendingApprovals || {}).length === 0 && !hasActiveOutput) {
           return <ThinkingLoader t={t} />;
         }
         return null;

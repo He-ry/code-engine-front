@@ -314,11 +314,11 @@ export default function App() {
   const threadIdRef = useRef<string | null>(null);
   const activeAiMsgIdRef = useRef<string | null>(null);
   const pendingInputRef = useRef<{ inputId: string; question: string } | null>(null);
-  const [pendingApproval, setPendingApproval] = useState<{
+  const [pendingApprovals, setPendingApprovals] = useState<Record<string, {
     approvalId: string;
     toolName: string;
     arguments: Record<string, any>;
-  } | null>(null);
+  }>>({});
 
   // Sync default chat messages on language switch if user hasn't added custom messages
   useEffect(() => {
@@ -703,11 +703,15 @@ export default function App() {
         break;
       }
       case "approval_required": {
-        setPendingApproval({
-          approvalId: data.approvalId || data.approval_id || "",
-          toolName: data.toolName || data.tool_name || "",
-          arguments: data.arguments || {},
-        });
+        const approvalId = data.approvalId || data.approval_id || "";
+        setPendingApprovals((prev) => ({
+          ...prev,
+          [approvalId]: {
+            approvalId,
+            toolName: data.toolName || data.tool_name || "",
+            arguments: data.arguments || {},
+          },
+        }));
         break;
       }
       case "error": {
@@ -765,17 +769,21 @@ export default function App() {
   };
 
   /** Approve or deny a pending sensitive-tool approval. */
-  const handleApproval = async (approved: boolean) => {
-    const p = pendingApproval;
+  const handleApproval = async (approved: boolean, approvalId?: string) => {
     const threadId = threadIdRef.current;
-    if (!p || !threadId) return;
-    setPendingApproval(null);
+    const effectiveApprovalId = approvalId || Object.keys(pendingApprovals)[0];
+    if (!effectiveApprovalId || !threadId) return;
+    setPendingApprovals((prev) => {
+      const next = { ...prev };
+      delete next[effectiveApprovalId];
+      return next;
+    });
     try {
       await approveTool(
         backendApiUrl || "https://agent.hery.cloud",
         user?.token || "",
         threadId,
-        p.approvalId,
+        effectiveApprovalId,
         approved
       );
     } catch (e) {
@@ -1152,7 +1160,7 @@ export default function App() {
                         messages={messages}
                         isGenerating={isGenerating}
                         onSelectOption={handleAskUserSubmit}
-                        pendingApproval={pendingApproval}
+                        pendingApprovals={pendingApprovals}
                         onApproval={handleApproval}
                       />
                       <div className="p-3 bg-[#ffffff]/90 dark:bg-zinc-950/90 backdrop-blur-xs">
