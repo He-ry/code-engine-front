@@ -243,7 +243,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   });
 
   const [defaultModel, setDefaultModelState] = useState<string>(() => {
-    return localStorage.getItem("app_default_model") || "glm-4-7";
+    return localStorage.getItem("app_default_model") || "Auto";
   });
 
   const [apiKey, setApiKeyState] = useState<string>(() => {

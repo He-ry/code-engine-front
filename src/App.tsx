@@ -289,6 +289,19 @@ export default function App() {
     setSelectedMode(language === "en-US" ? "Auto Accept Edits" : "自动接受编辑");
   }, [language]);
 
+  // Sync selectedModel to first enabled backend model when models load
+  useEffect(() => {
+    if (!backendModels.length) return;
+    const enabledModels = backendModels.filter((m) => m.isEnabled !== false);
+    if (!enabledModels.length) return;
+
+    const modelNames = new Set(enabledModels.map((m) => m.name));
+    // If current selection is "Auto" or not in the available models, pick the first enabled one
+    if (selectedModel === "Auto" || !modelNames.has(selectedModel)) {
+      setSelectedModel(enabledModels[0].name);
+    }
+  }, [backendModels]);
+
   // Dynamic Panel Resizing state
   const [chatWidth, setChatWidth] = useState<number>(380);
   const [rightPanelWidth, setRightPanelWidth] = useState<number>(320);
@@ -459,6 +472,29 @@ export default function App() {
               : m
           )
         );
+        break;
+      }
+      case "reasoning_text_delta": {
+        const delta = data.delta || "";
+        if (!delta) break;
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === aiMsgId
+              ? {
+                  ...m,
+                  agentStatus: "thinking",
+                  thinkingProcess: {
+                    ...(m.thinkingProcess || { thoughtText: "", isCollapsed: false }),
+                    thoughtText: (m.thinkingProcess?.thoughtText || "") + delta,
+                  },
+                }
+              : m
+          )
+        );
+        break;
+      }
+      case "reasoning_part_added": {
+        // Optional section separator — ChatStream renders a continuous panel.
         break;
       }
       case "item_started": {

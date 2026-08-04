@@ -48,11 +48,15 @@ export const PromptInput: React.FC<PromptInputProps> = ({
   isGenerating = false,
   onStop,
 }) => {
-  const { t, defaultModel, agentThinking } = useSettings();
+  const { t, defaultModel, agentThinking, backendModels } = useSettings();
   const [inputText, setInputText] = useState("");
   const [contextPills, setContextPills] = useState<ContextPill[]>([]);
   const [localMode, setLocalMode] = useState(t("自动接受编辑", "Auto Accept Edits"));
-  const [localModel, setLocalModel] = useState("Auto");
+  const [localModel, setLocalModel] = useState(() => {
+    // Resolve initial value: use first enabled model from the list if available
+    const enabled = (backendModels || []).filter((m) => m.isEnabled !== false);
+    return enabled.length > 0 ? enabled[0].name : "Auto";
+  });
 
   const selectedModel = propModel !== undefined ? propModel : localModel;
   const setSelectedModel = onModelChange || setLocalModel;
