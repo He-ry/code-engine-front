@@ -38,6 +38,7 @@ export interface UserProfile {
 }
 
 export interface TestConnectionParams {
+  id?: string;
   provider: string;
   protocol?: string;
   base_url: string;
@@ -551,6 +552,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         method: "POST",
         headers,
         body: JSON.stringify({
+          id: params.id || null,
           provider: params.provider || "Custom",
           protocol: params.protocol || "openai",
           base_url: params.base_url,

@@ -518,6 +518,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setIsTestingModalConn(true);
     try {
       const res = await testModelConnection({
+        id: editingModelId || undefined,
         provider: customName.trim() || "Custom",
         protocol: customProto,
         base_url: customBaseUrl.trim(),
@@ -554,6 +555,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setTestingModelIdMap((prev) => ({ ...prev, [modelId]: true }));
     try {
       const res = await testModelConnection({
+        id: modelId,
         provider: providerName,
         protocol: protocolVal,
         base_url: baseUrlVal,
@@ -2240,7 +2242,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   <label className="block text-[11px] font-medium text-gray-600 dark:text-zinc-400">API Key</label>
                   <input
                     type="password"
-                    placeholder="sk-••••••••••••••••"
+                    placeholder={editingModelId ? t("留空则使用已保存的密钥", "Leave empty to use saved key") : "sk-••••••••••••••••"}
                     value={customApiKey}
                     onChange={(e) => setCustomApiKey(e.target.value)}
                     className="w-full bg-gray-50 dark:bg-zinc-800/80 border border-gray-200 dark:border-zinc-700 rounded-md px-2.5 py-1.5 text-xs text-gray-800 dark:text-zinc-100 placeholder-gray-400 dark:placeholder-zinc-500 focus:outline-none focus:border-gray-400 dark:focus:border-zinc-500 font-mono transition-all"
