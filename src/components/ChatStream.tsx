@@ -192,18 +192,82 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
 
         // Construct timeline items for ordered rendering
         const timelineItems = (() => {
-          const tools = msg.toolExecutions || [];
+          const rawTools = msg.toolExecutions || [];
+          const tools = [...rawTools];
+
+          if (isLastMessage && pendingApproval) {
+            const approvalId = pendingApproval.approvalId;
+            const toolName = pendingApproval.toolName || "Execute";
+            const args = pendingApproval.arguments || {};
+            let name = "Execute";
+            let command = "";
+            if (
+              toolName.includes("file") ||
+              toolName.includes("write") ||
+              toolName.includes("edit") ||
+              toolName.includes("create")
+            ) {
+              name = toolName.includes("create")
+                ? "Create File"
+                : toolName.includes("delete")
+                ? "Delete File"
+                : "Edit File";
+              command = args.TargetFile || args.AbsolutePath || args.Path || "";
+            } else if (
+              toolName.includes("command") ||
+              toolName.includes("run") ||
+              toolName.includes("exec")
+            ) {
+              name = "Execute";
+              command = args.CommandLine || "";
+            } else if (toolName.includes("package") || toolName.includes("install")) {
+              name = "Install Package";
+              command = `npm install ${
+                Array.isArray(args.PackageNames)
+                  ? args.PackageNames.join(" ")
+                  : args.PackageNames || ""
+              }`;
+            } else {
+              name = toolName;
+              command = typeof args === "string" ? args : JSON.stringify(args);
+            }
+
+            const existingIdx = tools.findIndex(
+              (t) => (approvalId && t.id === approvalId) || t.status === "pending"
+            );
+
+            if (existingIdx >= 0) {
+              tools[existingIdx] = {
+                ...tools[existingIdx],
+                name: tools[existingIdx].name || name,
+                command: tools[existingIdx].command || command,
+                description: tools[existingIdx].description || command,
+                status: "pending",
+              };
+            } else {
+              tools.push({
+                id: approvalId || `pending-approval-${Date.now()}`,
+                name,
+                command,
+                description: command,
+                args: typeof args === "string" ? args : JSON.stringify(args),
+                status: "pending",
+                createdAt: Date.now(),
+              });
+            }
+          }
+
           const hasTimestamps =
             thoughtsList.some((t) => t.createdAt != null) ||
             tools.some((t) => t.createdAt != null);
 
           if (!hasTimestamps) {
             return [
-              ...thoughtsList.map((tp, idx) => ({
+              ...thoughtsList.map((tp, tpIdx) => ({
                 type: "thought" as const,
                 tp,
-                idx,
-                key: tp.id || `${msg.id}-thought-${idx}`,
+                idx: tpIdx,
+                key: tp.id || `${msg.id}-thought-${tpIdx}`,
               })),
               ...(tools.length > 0
                 ? [{ type: "tools" as const, tools, key: `${msg.id}-tools` }]
@@ -217,24 +281,24 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
 
           const items: TimelineItem[] = [];
 
-          thoughtsList.forEach((tp, idx) => {
+          thoughtsList.forEach((tp, tpIdx) => {
             items.push({
               type: "thought",
               tp,
-              idx,
-              key: tp.id || `${msg.id}-thought-${idx}`,
+              idx: tpIdx,
+              key: tp.id || `${msg.id}-thought-${tpIdx}`,
               time: tp.createdAt || 0,
             });
           });
 
-          if (tools.length > 0) {
+          tools.forEach((tool, toolIdx) => {
             items.push({
               type: "tools",
-              tools,
-              key: `${msg.id}-tools`,
-              time: tools[0]?.createdAt || 0,
+              tools: [tool],
+              key: tool.id || `${msg.id}-tool-${toolIdx}`,
+              time: tool.createdAt || 0,
             });
-          }
+          });
 
           items.sort((a, b) => a.time - b.time);
           return items;
@@ -261,7 +325,7 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
                         <ChevronDown className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500" />
                       )}
                       <span className="font-sans text-xs tracking-tight">
-                        {hasMultipleThoughts ? `${t("思考", "Thinking")} (#${item.idx + 1})` : t("思考过程", "Thinking")}
+                        {t("思考", "Thinking")}
                       </span>
                       {item.tp.durationSec && (
                         <span className="text-[11px] text-gray-400 dark:text-zinc-500 font-mono opacity-80">
@@ -283,7 +347,11 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
               if (item.type === "tools") {
                 return (
                   <div key={item.key} className="w-full">
-                    <ToolExecutionGroup tools={item.tools} />
+                    <ToolExecutionGroup
+                      tools={item.tools}
+                      onExecuteTool={() => onApproval?.(true)}
+                      onRejectTool={() => onApproval?.(false)}
+                    />
                   </div>
                 );
               }
@@ -638,67 +706,6 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
           </div>
         );
       })}
-
-      {/* 4.5. Tool Approval Pending Card - Rendered directly inside standard Execute ToolInvocationCard */}
-      {pendingApproval && (() => {
-        const toolName = pendingApproval.toolName || "Execute";
-        const args = pendingApproval.arguments || {};
-
-        let name = "Execute";
-        let command = "";
-        let description = "";
-
-        if (
-          toolName.includes("file") ||
-          toolName.includes("write") ||
-          toolName.includes("edit") ||
-          toolName.includes("create")
-        ) {
-          name = toolName.includes("create")
-            ? "Create File"
-            : toolName.includes("delete")
-            ? "Delete File"
-            : "Edit File";
-          command = args.TargetFile || args.AbsolutePath || args.Path || "";
-          description = command;
-        } else if (
-          toolName.includes("command") ||
-          toolName.includes("run") ||
-          toolName.includes("exec")
-        ) {
-          name = "Execute";
-          command = args.CommandLine || "";
-          description = command;
-        } else if (toolName.includes("package") || toolName.includes("install")) {
-          name = "Install Package";
-          const pkgs = Array.isArray(args.PackageNames)
-            ? args.PackageNames.join(" ")
-            : args.PackageNames || "";
-          command = `npm install ${pkgs}`;
-          description = command;
-        } else {
-          name = toolName;
-          command = typeof args === "string" ? args : JSON.stringify(args);
-          description = command;
-        }
-
-        const pendingToolExecution: ToolExecution = {
-          id: "pending-approval-tool",
-          name,
-          command,
-          description,
-          args: typeof args === "string" ? args : JSON.stringify(args),
-          status: "pending",
-        };
-
-        return (
-          <ToolInvocationCard
-            tool={pendingToolExecution}
-            onExecute={() => onApproval?.(true)}
-            onReject={() => onApproval?.(false)}
-          />
-        );
-      })()}
 
       {/* 5. Active Generating / Streaming Agent Status */}
       {(() => {

@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import {
   ChevronDown,
-  ChevronUp,
+  ChevronRight,
   Terminal,
   FileCode2,
   Package,
@@ -62,22 +62,37 @@ export const ToolInvocationCard: React.FC<ToolInvocationCardProps> = ({
 
   return (
     <div className="w-full my-1.5 font-sans text-xs select-none">
-      {/* Sleek Compact Card Bar */}
-      <div className="w-full px-3 py-2.5 rounded-xl border border-gray-200/90 dark:border-zinc-800 bg-white dark:bg-zinc-900/80 shadow-2xs flex items-center justify-between gap-3 transition-all">
-        {/* Left: Icon, Action Title & Command Snippet */}
-        <div className="flex items-center gap-2.5 min-w-0 flex-1">
-          <div className="w-6 h-6 rounded-md bg-gray-100 dark:bg-zinc-800/80 flex items-center justify-center shrink-0">
-            {isFile ? (
-              <FileCode2 className="w-3.5 h-3.5 text-blue-500" />
-            ) : isPkg ? (
-              <Package className="w-3.5 h-3.5 text-purple-500" />
-            ) : toolNameLower.includes("run") || toolNameLower.includes("exec") ? (
-              <Terminal className="w-3.5 h-3.5 text-emerald-500" />
+      {/* Sleek Compact Card Bar (Single Inline Row) */}
+      <div className="w-full px-2.5 py-2 rounded-xl border border-gray-200/90 dark:border-zinc-800 bg-white dark:bg-zinc-900/80 shadow-2xs flex items-center justify-between gap-2.5 transition-all">
+        {/* Left: Chevron Arrow (FIRST) + Icon + Action Title + Command */}
+        <div className="flex items-center gap-2 min-w-0 flex-1">
+          {/* 1. Expand/Collapse Chevron at the VERY FRONT */}
+          <button
+            onClick={() => setIsExpanded(!isExpanded)}
+            className="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-zinc-300 rounded transition-colors cursor-pointer shrink-0 -ml-0.5"
+            title={t("展开详情", "Toggle details")}
+          >
+            {isExpanded ? (
+              <ChevronDown className="w-3.5 h-3.5" />
             ) : (
-              <Wrench className="w-3.5 h-3.5 text-zinc-500" />
+              <ChevronRight className="w-3.5 h-3.5" />
+            )}
+          </button>
+
+          {/* 2. Tool Icon */}
+          <div className="w-5 h-5 rounded bg-gray-100 dark:bg-zinc-800 flex items-center justify-center shrink-0">
+            {isFile ? (
+              <FileCode2 className="w-3 h-3 text-blue-500" />
+            ) : isPkg ? (
+              <Package className="w-3 h-3 text-purple-500" />
+            ) : toolNameLower.includes("run") || toolNameLower.includes("exec") || toolNameLower.includes("command") ? (
+              <Terminal className="w-3 h-3 text-emerald-500" />
+            ) : (
+              <Wrench className="w-3 h-3 text-zinc-500" />
             )}
           </div>
 
+          {/* 3. Tool Name and Command snippet directly inline */}
           <div className="flex items-center gap-2 min-w-0 flex-1">
             <span className="font-semibold text-gray-800 dark:text-zinc-200 shrink-0">
               {tool.name}
@@ -86,27 +101,14 @@ export const ToolInvocationCard: React.FC<ToolInvocationCardProps> = ({
               {displayCommand}
             </span>
           </div>
-
-          {/* Details toggle chevron */}
-          <button
-            onClick={() => setIsExpanded(!isExpanded)}
-            className="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-zinc-300 rounded transition-colors cursor-pointer shrink-0"
-            title={t("展开详情", "Toggle details")}
-          >
-            {isExpanded ? (
-              <ChevronUp className="w-3.5 h-3.5" />
-            ) : (
-              <ChevronDown className="w-3.5 h-3.5" />
-            )}
-          </button>
         </div>
 
-        {/* Right: Actions / Status */}
+        {/* Right: Actions / Status directly inline */}
         <div className="flex items-center gap-2 shrink-0">
           {status === "pending" ? (
             <>
               {/* Mini Auto-execute Switch */}
-              <div className="flex items-center gap-1.5 mr-1 text-[11px] text-gray-500 dark:text-zinc-400">
+              <div className="flex items-center gap-1 mr-0.5 text-[11px] text-gray-500 dark:text-zinc-400">
                 <button
                   type="button"
                   role="switch"
@@ -128,22 +130,22 @@ export const ToolInvocationCard: React.FC<ToolInvocationCardProps> = ({
                     }`}
                   />
                 </button>
-                <span className="text-[11px]">{t("自动", "Auto")}</span>
+                <span className="text-[10.5px] select-none">{t("自动", "Auto")}</span>
               </div>
 
               {/* Action Buttons */}
               <button
                 onClick={handleRejectClick}
-                className="px-2.5 py-1 text-xs font-medium text-gray-600 dark:text-zinc-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-md transition-colors cursor-pointer"
+                className="px-2 py-0.5 text-xs font-medium text-gray-600 hover:text-rose-600 dark:text-zinc-400 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded transition-colors cursor-pointer"
               >
                 {t("拒绝", "Reject")}
               </button>
 
               <button
                 onClick={handleExecuteClick}
-                className="px-3 py-1 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 rounded-md shadow-2xs transition-all cursor-pointer flex items-center gap-1"
+                className="px-2.5 py-0.5 text-xs font-semibold text-gray-900 bg-[#E0E0E0] hover:bg-[#d0d0d0] active:bg-[#c0c0c0] dark:bg-[#E0E0E0] dark:text-gray-900 border border-gray-300/80 dark:border-zinc-600 rounded shadow-2xs transition-all cursor-pointer flex items-center gap-1"
               >
-                <Check className="w-3 h-3" />
+                <Check className="w-3 h-3 text-gray-900" />
                 <span>{t("执行", "Execute")}</span>
               </button>
             </>
@@ -168,7 +170,7 @@ export const ToolInvocationCard: React.FC<ToolInvocationCardProps> = ({
 
       {/* Expanded Detail View */}
       {isExpanded && (
-        <div className="mt-1.5 p-3 rounded-xl border border-gray-200/80 dark:border-zinc-800/80 bg-gray-50 dark:bg-zinc-950/60 font-mono text-[11px] space-y-2">
+        <div className="mt-1 p-2.5 rounded-xl border border-gray-200/80 dark:border-zinc-800/80 bg-gray-50 dark:bg-zinc-950/60 font-mono text-[11px] space-y-2">
           <div className="flex items-center justify-between text-gray-500 dark:text-zinc-400 font-sans text-[11px]">
             <span>{t("完整指令 / 参数：", "Full Command / Arguments:")}</span>
           </div>

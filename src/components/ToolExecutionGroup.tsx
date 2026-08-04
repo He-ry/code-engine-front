@@ -10,9 +10,10 @@ import {
   Loader2,
   CheckCircle2,
   XCircle,
+  Check,
 } from "lucide-react";
 import { ToolExecution } from "../types";
-import { ToolInvocationCard } from "./ToolInvocationCard";
+import { useSettings } from "../context/SettingsContext";
 
 interface ToolExecutionGroupProps {
   tools: ToolExecution[];
@@ -129,27 +130,20 @@ export const ToolExecutionGroup: React.FC<ToolExecutionGroupProps> = ({
   onExecuteTool,
   onRejectTool,
 }) => {
+  const { t } = useSettings();
   const [isCollapsed, setIsCollapsed] = useState(false);
 
   if (!tools || tools.length === 0) return null;
 
-  // Separate pending interactive cards (requiring explicit action) from standard tool execution logs
-  const interactiveTools = tools.filter(
-    (t) => t.status === "pending" || t.autoExecute === false
-  );
-  const inlineTools = tools.filter(
-    (t) => !(t.status === "pending" || t.autoExecute === false)
-  );
-
   // Calculate header text
   const getHeaderTitle = () => {
-    const total = inlineTools.length;
+    const total = tools.length;
     let readCount = 0;
     let editCount = 0;
     let runCount = 0;
     let searchCount = 0;
 
-    inlineTools.forEach((t) => {
+    tools.forEach((t) => {
       const name = t.name.toLowerCase();
       if (name.includes("view") || name.includes("read") || name.includes("get")) readCount++;
       else if (name.includes("edit") || name.includes("create") || name.includes("write")) editCount++;
@@ -168,91 +162,104 @@ export const ToolExecutionGroup: React.FC<ToolExecutionGroupProps> = ({
   };
 
   return (
-    <div className="w-full space-y-2 my-1.5 font-sans">
-      {/* Interactive Tool Cards */}
-      {interactiveTools.map((tool) => (
-        <ToolInvocationCard
-          key={tool.id}
-          tool={tool}
-          onExecute={onExecuteTool}
-          onReject={onRejectTool}
-        />
-      ))}
-
-      {/* Collapsible Tool Log Group */}
-      {inlineTools.length > 0 && (
-        <div className="text-xs text-gray-600 dark:text-zinc-400">
-          {/* Group Header Toggle */}
-          <button
-            type="button"
-            onClick={() => setIsCollapsed(!isCollapsed)}
-            className="flex items-center gap-1.5 py-1 px-1 -ml-1 text-xs font-medium text-gray-600 dark:text-zinc-400 hover:text-gray-900 dark:hover:text-zinc-200 transition-colors select-none group cursor-pointer"
-          >
-            <span>{getHeaderTitle()}</span>
-            {isCollapsed ? (
-              <ChevronRight className="w-3.5 h-3.5 text-gray-400 group-hover:text-gray-600 dark:group-hover:text-zinc-300 transition-colors" />
-            ) : (
-              <ChevronDown className="w-3.5 h-3.5 text-gray-400 group-hover:text-gray-600 dark:group-hover:text-zinc-300 transition-colors" />
-            )}
-          </button>
-
-          {/* Group Items */}
-          {!isCollapsed && (
-            <div className="space-y-0.5 mt-0.5 pl-0.5">
-              {inlineTools.map((tool) => {
-                const info = parseToolInfo(tool);
-                return (
-                  <div
-                    key={tool.id}
-                    className="flex items-center gap-2 py-0.5 px-1.5 rounded hover:bg-gray-100/60 dark:hover:bg-zinc-800/40 transition-colors text-xs text-gray-600 dark:text-zinc-400"
-                  >
-                    {/* Status / Icon */}
-                    {tool.status === "running" ? (
-                      <Loader2 className="w-3.5 h-3.5 text-blue-500 animate-spin shrink-0" />
-                    ) : tool.status === "error" ? (
-                      <XCircle className="w-3.5 h-3.5 text-rose-500 shrink-0" />
-                    ) : info.iconType === "eye" ? (
-                      <Eye className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 shrink-0" />
-                    ) : info.iconType === "pencil" ? (
-                      <Pencil className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 shrink-0" />
-                    ) : info.iconType === "terminal" ? (
-                      <Terminal className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 shrink-0" />
-                    ) : info.iconType === "search" ? (
-                      <Search className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 shrink-0" />
-                    ) : (
-                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
-                    )}
-
-                    {/* Action Verb */}
-                    <span className="text-gray-500 dark:text-zinc-400 font-normal shrink-0">
-                      {info.action}
-                    </span>
-
-                    {/* File / Command / Detail */}
-                    <span className="text-gray-700 dark:text-zinc-300 font-mono text-[11.5px] truncate max-w-[340px]">
-                      {info.fileName}
-                    </span>
-
-                    {/* Line Range */}
-                    {info.lineRange && (
-                      <span className="text-gray-400 dark:text-zinc-500 font-mono text-[11px] shrink-0">
-                        {info.lineRange}
-                      </span>
-                    )}
-
-                    {/* Duration / Status result fallback */}
-                    {tool.duration && (
-                      <span className="text-gray-400 dark:text-zinc-500 font-mono text-[10px] ml-auto shrink-0">
-                        {tool.duration}
-                      </span>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
+    <div className="w-full my-1.5 font-sans">
+      <div className="text-xs text-gray-600 dark:text-zinc-400">
+        {/* Group Header Toggle */}
+        <button
+          type="button"
+          onClick={() => setIsCollapsed(!isCollapsed)}
+          className="flex items-center gap-1.5 py-1 px-1 -ml-1 text-xs font-medium text-gray-600 dark:text-zinc-400 hover:text-gray-900 dark:hover:text-zinc-200 transition-colors select-none group cursor-pointer"
+        >
+          {isCollapsed ? (
+            <ChevronRight className="w-3.5 h-3.5 text-gray-400 group-hover:text-gray-600 dark:group-hover:text-zinc-300 transition-colors" />
+          ) : (
+            <ChevronDown className="w-3.5 h-3.5 text-gray-400 group-hover:text-gray-600 dark:group-hover:text-zinc-300 transition-colors" />
           )}
-        </div>
-      )}
+          <span>{getHeaderTitle()}</span>
+        </button>
+
+        {/* Group Items */}
+        {!isCollapsed && (
+          <div className="space-y-1 mt-0.5 pl-0.5">
+            {tools.map((tool) => {
+              const info = parseToolInfo(tool);
+              return (
+                <div
+                  key={tool.id}
+                  className="flex items-center gap-2 py-1 px-2 rounded-lg bg-gray-50/80 dark:bg-zinc-900/60 border border-gray-200/60 dark:border-zinc-800/60 hover:border-gray-300 dark:hover:border-zinc-700 transition-colors text-xs text-gray-600 dark:text-zinc-400"
+                >
+                  {/* Status / Icon */}
+                  {tool.status === "running" ? (
+                    <Loader2 className="w-3.5 h-3.5 text-indigo-500 dark:text-indigo-400 animate-spin shrink-0" />
+                  ) : tool.status === "pending" ? (
+                    <div className="flex items-center justify-center shrink-0">
+                      <span className="relative flex h-2.5 w-2.5">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+                      </span>
+                    </div>
+                  ) : tool.status === "error" ? (
+                    <XCircle className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+                  ) : info.iconType === "eye" ? (
+                    <Eye className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 shrink-0" />
+                  ) : info.iconType === "pencil" ? (
+                    <Pencil className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 shrink-0" />
+                  ) : info.iconType === "terminal" ? (
+                    <Terminal className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 shrink-0" />
+                  ) : info.iconType === "search" ? (
+                    <Search className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 shrink-0" />
+                  ) : (
+                    <Wrench className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 shrink-0" />
+                  )}
+
+                  {/* Action Verb */}
+                  <span className="text-gray-500 dark:text-zinc-400 font-medium shrink-0">
+                    {info.action}
+                  </span>
+
+                  {/* File / Command / Detail */}
+                  <span className="text-gray-700 dark:text-zinc-300 font-mono text-[11.5px] truncate max-w-[200px] sm:max-w-[340px]">
+                    {info.fileName}
+                  </span>
+
+                  {/* Line Range */}
+                  {info.lineRange && (
+                    <span className="text-gray-400 dark:text-zinc-500 font-mono text-[11px] shrink-0">
+                      {info.lineRange}
+                    </span>
+                  )}
+
+                  {/* Inline Execute / Reject Actions or Status */}
+                  {tool.status === "pending" ? (
+                    <div className="flex items-center gap-1.5 ml-auto shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => onRejectTool?.(tool.id)}
+                        className="px-2 py-0.5 text-xs font-medium text-gray-500 hover:text-rose-600 dark:text-zinc-400 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded transition-colors cursor-pointer"
+                      >
+                        {t("拒绝", "Reject")}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => onExecuteTool?.(tool.id)}
+                        className="px-2.5 py-0.5 text-xs font-medium text-gray-700 dark:text-zinc-200 bg-gray-200/90 hover:bg-gray-300 dark:bg-zinc-800 dark:hover:bg-zinc-700 border border-gray-300/70 dark:border-zinc-700 rounded shadow-2xs transition-all cursor-pointer flex items-center gap-1"
+                      >
+                        <Check className="w-3 h-3 text-gray-600 dark:text-zinc-300" />
+                        <span>{t("执行", "Execute")}</span>
+                      </button>
+                    </div>
+                  ) : tool.duration ? (
+                    <span className="text-gray-400 dark:text-zinc-500 font-mono text-[10px] ml-auto shrink-0">
+                      {tool.duration}
+                    </span>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 };
