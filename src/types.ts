@@ -104,6 +104,15 @@ export interface ToolExecution {
   duration?: string;
   autoExecute?: boolean;
   createdAt?: number;
+  errorReason?: string; // "user_denied" | "execution_failed" | "cancelled" | ...
+  wasAborted?: boolean;
+  /** Accumulated argument delta (e.g. file content being written). */
+  contentDelta?: string;
+}
+
+export interface TextSegment {
+  text: string;
+  createdAt: number;
 }
 
 export interface ClarificationQuestion {
@@ -128,6 +137,11 @@ export interface ThinkingProcess {
   createdAt?: number;
 }
 
+export interface PlanStep {
+  step: string;
+  status: "pending" | "in_progress" | "completed" | "failed";
+}
+
 export interface ChatMessage {
   id: string;
   sender: "user" | "ai";
@@ -140,8 +154,11 @@ export interface ChatMessage {
   toolLogs?: string[];
   thinkingProcess?: ThinkingProcess;
   thinkingProcesses?: ThinkingProcess[];
+  textSegments?: TextSegment[];
   toolExecutions?: ToolExecution[];
   clarificationQuestions?: ClarificationQuestion[];
+  planSteps?: PlanStep[];
+  planExplanation?: string;
   agentStatus?: "thinking" | "executing_tool" | "asking_clarification" | "generating" | "completed";
   isStreaming?: boolean;
 }

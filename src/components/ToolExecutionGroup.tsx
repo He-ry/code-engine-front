@@ -10,6 +10,8 @@ import {
   Loader2,
   CheckCircle2,
   XCircle,
+  Clock,
+  StopCircle,
   Check,
 } from "lucide-react";
 import { ToolExecution } from "../types";
@@ -23,11 +25,13 @@ interface ToolExecutionGroupProps {
 
 export function parseToolInfo(tool: ToolExecution) {
   const nameLower = tool.name.toLowerCase();
+  // Prefer human-readable command/description over raw JSON args for display.
+  const displayText = tool.command || tool.description || tool.args || "";
 
   // 1. Read / View File
   if (nameLower.includes("view") || nameLower.includes("read") || nameLower.includes("get")) {
-    let fileName = extractFileName(tool.args || tool.description || "");
-    let lineRange = extractLineRange(tool.args || "", tool.result || "");
+    let fileName = extractFileName(displayText);
+    let lineRange = extractLineRange(displayText, tool.result || "");
     return {
       type: "read",
       action: "Read",
@@ -37,9 +41,9 @@ export function parseToolInfo(tool: ToolExecution) {
     };
   }
 
-  // 2. Edit / Create File
-  if (nameLower.includes("edit") || nameLower.includes("create") || nameLower.includes("write")) {
-    let fileName = extractFileName(tool.args || tool.description || "");
+  // 2. Edit / Create File (includes apply_patch for file patching)
+  if (nameLower.includes("edit") || nameLower.includes("create") || nameLower.includes("write") || nameLower.includes("patch")) {
+    let fileName = extractFileName(displayText);
     let action = nameLower.includes("create") ? "Created" : "Edited";
     return {
       type: "edit",
@@ -50,9 +54,9 @@ export function parseToolInfo(tool: ToolExecution) {
     };
   }
 
-  // 3. Command Execution
-  if (nameLower.includes("run") || nameLower.includes("command") || nameLower.includes("exec") || nameLower.includes("terminal")) {
-    let cmd = tool.command || tool.args || "";
+  // 3. Command Execution (bash, run, exec, etc.)
+  if (nameLower.includes("bash") || nameLower.includes("run") || nameLower.includes("command") || nameLower.includes("exec") || nameLower.includes("terminal")) {
+    let cmd = displayText;
     cmd = cmd.replace(/^(command:|cmd:|args:)/i, "").trim();
     return {
       type: "run",
@@ -65,11 +69,10 @@ export function parseToolInfo(tool: ToolExecution) {
 
   // 4. Search
   if (nameLower.includes("search") || nameLower.includes("grep") || nameLower.includes("find")) {
-    let query = tool.args || "";
     return {
       type: "search",
       action: "Search",
-      fileName: query || "query",
+      fileName: displayText || "query",
       lineRange: "",
       iconType: "search" as const,
     };
@@ -79,7 +82,7 @@ export function parseToolInfo(tool: ToolExecution) {
   return {
     type: "other",
     action: tool.name,
-    fileName: tool.args || tool.description || "",
+    fileName: displayText,
     lineRange: tool.result || "",
     iconType: "wrench" as const,
   };
@@ -146,8 +149,8 @@ export const ToolExecutionGroup: React.FC<ToolExecutionGroupProps> = ({
     tools.forEach((t) => {
       const name = t.name.toLowerCase();
       if (name.includes("view") || name.includes("read") || name.includes("get")) readCount++;
-      else if (name.includes("edit") || name.includes("create") || name.includes("write")) editCount++;
-      else if (name.includes("run") || name.includes("command") || name.includes("exec")) runCount++;
+      else if (name.includes("edit") || name.includes("create") || name.includes("write") || name.includes("patch")) editCount++;
+      else if (name.includes("bash") || name.includes("run") || name.includes("command") || name.includes("exec")) runCount++;
       else if (name.includes("search") || name.includes("grep")) searchCount++;
     });
 
@@ -199,7 +202,13 @@ export const ToolExecutionGroup: React.FC<ToolExecutionGroupProps> = ({
                       </span>
                     </div>
                   ) : tool.status === "error" ? (
-                    <XCircle className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+                    tool.errorReason === "approval_timeout" ? (
+                      <Clock className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                    ) : tool.errorReason === "cancelled" ? (
+                      <StopCircle className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+                    ) : (
+                      <XCircle className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+                    )
                   ) : info.iconType === "eye" ? (
                     <Eye className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 shrink-0" />
                   ) : info.iconType === "pencil" ? (
@@ -255,6 +264,15 @@ export const ToolExecutionGroup: React.FC<ToolExecutionGroupProps> = ({
                     </span>
                   ) : null}
                 </div>
+                {/* Streaming content preview — shows last ~120 chars while the
+                    tool arguments are still being generated (e.g. write_file). */}
+                {tool.status === "running" && tool.contentDelta && tool.contentDelta.length > 10 && (
+                  <div className="mt-1 ml-5 text-[11px] font-mono text-gray-400 dark:text-zinc-500 truncate max-w-[320px] pl-2 border-l border-gray-200 dark:border-zinc-700/60">
+                    {tool.contentDelta.length > 120
+                      ? "…" + tool.contentDelta.slice(-120)
+                      : tool.contentDelta}
+                  </div>
+                )}
               );
             })}
           </div>

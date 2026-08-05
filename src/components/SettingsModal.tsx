@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { useSettings } from "../context/SettingsContext";
 import { useToast } from "../context/ToastContext";
+import { ServerAddressSelector } from "./ServerAddressSelector";
 import {
   Settings,
   Bot,
@@ -415,8 +416,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setAutoSave,
     agentThinking,
     setAgentThinking,
-    autoApproveCmd,
-    setAutoApproveCmd,
+    approvalPolicy,
+    setApprovalPolicy,
     defaultModel,
     setDefaultModel,
     apiKey,
@@ -1521,7 +1522,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               {activeCategory === "general" && (
                 <div className="space-y-4 text-xs text-gray-700 dark:text-zinc-300">
                   <div className="p-4 bg-[#f8f9fa] dark:bg-zinc-900/60 border border-gray-200/90 dark:border-zinc-800 rounded-md space-y-4 shadow-2xs">
-                    <div className="space-y-1 relative">
+                    {/* Server Address Setting */}
+                    <div className="space-y-1">
+                      <label className="block text-xs font-bold text-gray-900 dark:text-zinc-100">{t("后端服务地址", "Backend Server Address")}</label>
+                      <p className="text-gray-400 dark:text-zinc-500 text-[11px]">{t("配置 CodeEngine 后端 API 服务地址，切换后所有 API 请求将发送到新地址", "Configure the CodeEngine backend API server. All API requests will be sent to the new address after switching.")}</p>
+                      <div className="pt-1">
+                        <ServerAddressSelector variant="settings" />
+                      </div>
+                    </div>
+
+                    <div className="pt-3 border-t border-gray-200/70 dark:border-zinc-800 space-y-1 relative">
                       <label className="block text-xs font-bold text-gray-900 dark:text-zinc-100">{t("界面语言", "Display Language")}</label>
                       <p className="text-gray-400 dark:text-zinc-500 text-[11px]">{t("选择系统首选显示语言", "Choose preferred system language")}</p>
                       
@@ -1700,32 +1710,42 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       </div>
                     </div>
 
-                    <div className="pt-3 border-t border-gray-200/70 dark:border-zinc-800 flex items-center justify-between">
-                      <div>
-                        <span className="block text-xs font-bold text-gray-900 dark:text-zinc-100">{t("自动执行安全命令", "Auto-Execute Safe Commands")}</span>
-                        <span className="text-gray-400 dark:text-zinc-500 text-[11px]">{t("允许 Agent 无需弹窗确认即可安全运行 Lint 或 Build 步骤", "Allow Agent to safely run Lint or Build commands without popup confirmation")}</span>
+                    <div className="pt-3 border-t border-gray-200/70 dark:border-zinc-800">
+                      <div className="mb-2.5">
+                        <span className="block text-xs font-bold text-gray-900 dark:text-zinc-100">{t("命令审批策略", "Command Approval Policy")}</span>
+                        <span className="text-gray-400 dark:text-zinc-500 text-[11px]">{t("控制 Agent 执行终端命令前是否需要用户确认", "Control whether Agent needs user confirmation before running commands")}</span>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const nextVal = !autoApproveCmd;
-                          setAutoApproveCmd(nextVal);
-                          if (nextVal) {
-                            showSuccess(t("自动执行安全命令已开启", "Auto-Run Commands Enabled"), t("允许 Agent 无需频繁弹窗确认即运行安全指令", "Allow Agent to run safe commands without confirmation popups"));
-                          } else {
-                            showInfo(t("自动执行安全命令已关闭", "Auto-Run Commands Disabled"), t("Agent 运行命令前将提示手动确认", "Prompt confirmation before executing terminal commands"));
-                          }
-                        }}
-                        className={`w-9 h-5 rounded-full transition-colors relative flex items-center px-0.5 cursor-pointer shrink-0 ${
-                          autoApproveCmd ? "bg-[#2563eb] dark:bg-blue-600" : "bg-gray-300 dark:bg-zinc-700"
-                        }`}
-                      >
-                        <div
-                          className={`w-4 h-4 bg-white rounded-full shadow-xs transition-transform transform ${
-                            autoApproveCmd ? "translate-x-4" : "translate-x-0"
-                          }`}
-                        />
-                      </button>
+                      <div className="grid grid-cols-2 gap-2">
+                        {([
+                          { value: "never", label: t("从不询问", "Never Ask"), desc: t("全自动执行（除写入文件）", "Auto-run everything (except file writes)") },
+                          { value: "on_request", label: t("仅拦截危险命令", "Dangerous Only"), desc: t("rm/sudo/curl|sh 等才需确认", "Only prompt for rm/sudo/curl|sh etc.") },
+                          { value: "unless_trusted", label: t("信任安全命令", "Trust Safe"), desc: t("已知读命令放行，其他需审批", "Known-safe read commands allowed, others prompt") },
+                          { value: "always", label: t("始终询问", "Always Ask"), desc: t("每个工具调用都要确认", "Prompt for every tool invocation") },
+                        ] as const).map(({ value, label, desc }) => {
+                          const isActive = approvalPolicy === value;
+                          return (
+                            <button
+                              key={value}
+                              type="button"
+                              onClick={() => {
+                                setApprovalPolicy(value);
+                                showSuccess(t("审批策略已更新", "Approval Policy Updated"), `${label} — ${desc}`);
+                              }}
+                              className={`text-left px-3 py-2.5 rounded-lg border text-xs transition-all cursor-pointer ${
+                                isActive
+                                  ? "border-[#2563eb] dark:border-blue-500 bg-blue-50 dark:bg-blue-950/40 text-gray-900 dark:text-zinc-100 shadow-2xs"
+                                  : "border-gray-200 dark:border-zinc-700 text-gray-600 dark:text-zinc-400 hover:border-gray-300 dark:hover:border-zinc-600"
+                              }`}
+                            >
+                              <div className="font-semibold text-xs flex items-center gap-1.5">
+                                {isActive && <Check className="w-3 h-3 text-[#2563eb] dark:text-blue-400 shrink-0" />}
+                                {label}
+                              </div>
+                              <div className="text-[10px] text-gray-400 dark:text-zinc-500 mt-0.5">{desc}</div>
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
                   </div>
                 </div>

@@ -81,6 +81,7 @@ interface SidebarProps {
   onSelectProject: (id: string) => void;
   onNewTask: () => void;
   onCreateProject?: (name: string, gitUrl?: string) => void;
+  onSelectThread?: (threadId: string) => void;
   pinned: boolean;
   isOpen: boolean;
   onTogglePin?: () => void;
@@ -95,6 +96,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSelectProject,
   onNewTask,
   onCreateProject,
+  onSelectThread,
   pinned,
   isOpen,
   onTogglePin,
@@ -406,6 +408,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                               return threads.map((thread: any) => (
                                 <div
                                   key={thread.id}
+                                  onClick={() => onSelectThread?.(thread.id)}
                                   className="flex items-center gap-1.5 py-1 px-1.5 hover:bg-gray-300/40 dark:hover:bg-zinc-800/80 rounded text-gray-700 dark:text-zinc-300 cursor-pointer transition-colors"
                                 >
                                   <MessageSquare className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 shrink-0" />

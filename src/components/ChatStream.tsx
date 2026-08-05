@@ -2,9 +2,9 @@ import React, { useState, useRef, useEffect } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useSettings } from "../context/SettingsContext";
-import { ChatMessage, ToolExecution, ThinkingProcess } from "../types";
+import { ChatMessage, ToolExecution, ThinkingProcess, TextSegment } from "../types";
 import { CodeBlock } from "./CodeBlock";
-import { ToolExecutionGroup } from "./ToolExecutionGroup";
+import { ToolInvocationCard } from "./ToolInvocationCard";
 import { ThinkingLoader } from "./ThinkingLoader";
 import {
   Copy,
@@ -187,209 +187,57 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
           ? [msg.thinkingProcess]
           : [];
 
-        const hasMultipleThoughts = thoughtsList.length > 1;
+        // ── Build ordered stream items from text segments, thoughts, and tools ──
+        type StreamItem =
+          | { type: "text"; text: string; key: string; time: number }
+          | { type: "thought"; tp: ThinkingProcess; key: string; time: number }
+          | { type: "tool"; tool: ToolExecution; key: string; time: number };
 
-        // Construct timeline items for ordered rendering
-        const timelineItems = (() => {
-          const rawTools = msg.toolExecutions || [];
-          const tools = [...rawTools];
+        const streamItems: StreamItem[] = [];
 
-          // Merge all pending approvals into the tool list for the last message.
-          if (isLastMessage && pendingApprovals) {
-            for (const pendingApproval of Object.values(pendingApprovals)) {
-              const approvalId = pendingApproval.approvalId;
-              const toolName = pendingApproval.toolName || "Execute";
-              const args = pendingApproval.arguments || {};
-              let name = "Execute";
-              let command = "";
-              if (
-                toolName.includes("file") ||
-                toolName.includes("write") ||
-                toolName.includes("edit") ||
-                toolName.includes("create")
-              ) {
-                name = toolName.includes("create")
-                  ? "Create File"
-                  : toolName.includes("delete")
-                  ? "Delete File"
-                  : "Edit File";
-                command = args.TargetFile || args.AbsolutePath || args.Path || "";
-              } else if (
-                toolName.includes("command") ||
-                toolName.includes("run") ||
-                toolName.includes("exec")
-              ) {
-                name = "Execute";
-                command = args.CommandLine || "";
-              } else if (toolName.includes("package") || toolName.includes("install")) {
-                name = "Install Package";
-                command = `npm install ${
-                  Array.isArray(args.PackageNames)
-                    ? args.PackageNames.join(" ")
-                    : args.PackageNames || ""
-                }`;
-              } else {
-                name = toolName;
-                command = typeof args === "string" ? args : JSON.stringify(args);
-              }
-
-              // Only match by exact approvalId — never use status wildcard
-              // to avoid overwriting unrelated server-streamed tools.
-              const existingIdx = approvalId
-                ? tools.findIndex((t) => t.id === approvalId)
-                : -1;
-
-              if (existingIdx >= 0) {
-                tools[existingIdx] = {
-                  ...tools[existingIdx],
-                  name: tools[existingIdx].name || name,
-                  command: tools[existingIdx].command || command,
-                  description: tools[existingIdx].description || command,
-                  status: "pending",
-                };
-              } else {
-                tools.push({
-                  id: approvalId || `pending-approval-${Date.now()}`,
-                  name,
-                  command,
-                  description: command,
-                  args: typeof args === "string" ? args : JSON.stringify(args),
-                  status: "pending",
-                  createdAt: Date.now(),
-                });
-              }
+        // Text segments (from handleAgentEvent splitting at tool boundaries)
+        const segments = msg.textSegments || [];
+        if (segments.length > 0) {
+          segments.forEach((seg, i) => {
+            if (seg.text.trim()) {
+              streamItems.push({
+                type: "text", text: seg.text,
+                key: `${msg.id}-text-${i}`, time: seg.createdAt || 0,
+              });
             }
-          }
-
-          const hasTimestamps =
-            thoughtsList.some((t) => t.createdAt != null) ||
-            tools.some((t) => t.createdAt != null);
-
-          if (!hasTimestamps) {
-            return [
-              ...thoughtsList.map((tp, tpIdx) => ({
-                type: "thought" as const,
-                tp,
-                idx: tpIdx,
-                key: tp.id || `${msg.id}-thought-${tpIdx}`,
-              })),
-              ...(tools.length > 0
-                ? [{ type: "tools" as const, tools, key: `${msg.id}-tools` }]
-                : []),
-            ];
-          }
-
-          type TimelineItem =
-            | { type: "thought"; tp: ThinkingProcess; idx: number; key: string; time: number }
-            | { type: "tools"; tools: ToolExecution[]; key: string; time: number };
-
-          const items: TimelineItem[] = [];
-
-          thoughtsList.forEach((tp, tpIdx) => {
-            items.push({
-              type: "thought",
-              tp,
-              idx: tpIdx,
-              key: tp.id || `${msg.id}-thought-${tpIdx}`,
-              time: tp.createdAt || 0,
-            });
           });
+        } else if (msg.text) {
+          // Fallback: no segments yet (e.g. legacy messages or pure text turn)
+          streamItems.push({
+            type: "text", text: msg.text,
+            key: `${msg.id}-text-0`, time: 0,
+          });
+        }
 
-          // Group all tools into a single timeline item so the group
-          // header counts correctly (e.g. "Executed 3 tools").
-          if (tools.length > 0) {
-            const earliestToolTime = Math.min(
-              ...tools.map((t) => t.createdAt || 0)
-            );
-            items.push({
-              type: "tools",
-              tools,
-              key: `${msg.id}-tools`,
-              time: earliestToolTime,
-            });
-          }
+        // Thinking blocks
+        thoughtsList.forEach((tp, tpIdx) => {
+          streamItems.push({
+            type: "thought", tp,
+            key: tp.id || `${msg.id}-thought-${tpIdx}`,
+            time: tp.createdAt || 0,
+          });
+        });
 
-          items.sort((a, b) => a.time - b.time);
-          return items;
-        })();
+        // Tool cards — each rendered individually (no longer grouped)
+        (msg.toolExecutions || []).forEach((tool) => {
+          streamItems.push({
+            type: "tool", tool,
+            key: tool.id, time: tool.createdAt || 0,
+          });
+        });
 
-        return (
-          <div key={msg.id} className="group flex flex-col items-start w-full space-y-3">
-            {/* Render Thinking Blocks and Tool Executions */}
-            {timelineItems.map((item) => {
-              if (item.type === "thought") {
-                const isThoughtCollapsed =
-                  collapsedThoughts[item.key] ?? (item.tp.isCollapsed ?? false);
+        streamItems.sort((a, b) => a.time - b.time);
 
-                return (
-                  <div key={item.key} className="w-full text-xs transition-all font-sans">
-                    {/* Thinking Toggle Header */}
-                    <button
-                      onClick={() => toggleThought(item.key)}
-                      className="flex items-center gap-1.5 text-xs text-gray-400 dark:text-zinc-500 hover:text-gray-600 dark:hover:text-zinc-300 cursor-pointer select-none py-0.5 transition-colors font-sans"
-                    >
-                      {isThoughtCollapsed ? (
-                        <ChevronRight className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500" />
-                      ) : (
-                        <ChevronDown className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500" />
-                      )}
-                      <span className="font-sans text-xs tracking-tight">
-                        {t("思考", "Thinking")}
-                      </span>
-                      {item.tp.durationSec && (
-                        <span className="text-[11px] text-gray-400 dark:text-zinc-500 font-mono opacity-80">
-                          ({item.tp.durationSec}s)
-                        </span>
-                      )}
-                    </button>
-
-                    {/* Thinking Body */}
-                    {!isThoughtCollapsed && (
-                      <div className="mt-1.5 pl-3 border-l border-gray-200 dark:border-zinc-800/80 text-xs text-gray-500 dark:text-zinc-400 leading-relaxed font-sans space-y-1 py-0.5 whitespace-pre-wrap">
-                        {item.tp.thoughtText}
-                      </div>
-                    )}
-                  </div>
-                );
-              }
-
-              if (item.type === "tools") {
-                return (
-                  <div key={item.key} className="w-full">
-                    <ToolExecutionGroup
-                      tools={item.tools}
-                      onExecuteTool={(toolId) => onApproval?.(true, toolId)}
-                      onRejectTool={(toolId) => onApproval?.(false, toolId)}
-                    />
-                  </div>
-                );
-              }
-
-              return null;
-            })}
-
-            {/* Fallback Tool Logs if no toolExecutions */}
-            {(!msg.toolExecutions || msg.toolExecutions.length === 0) &&
-              msg.toolLogs &&
-              msg.toolLogs.length > 0 && (
-                <div className="w-full">
-                  {msg.toolLogs.map((log, idx) => (
-                    <div
-                      key={idx}
-                      className="flex items-center gap-2 text-gray-600 dark:text-zinc-400 py-0.5 text-xs font-mono"
-                    >
-                      <Terminal className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 shrink-0" />
-                      <span>{log}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-            {/* 3. Main AI Text Content */}
-            <div className="text-[13px] leading-relaxed text-gray-800 dark:text-zinc-200 w-full font-sans space-y-1">
-              <Markdown
-                remarkPlugins={[remarkGfm]}
-                components={{
+        // ── Markdown renderer (reused for text segments) ──
+        const renderMarkdown = (text: string) => (
+          <Markdown
+            remarkPlugins={[remarkGfm]}
+            components={{
                   code(props: any) {
                     const { node, className, children, ...rest } = props;
                     const match = /language-(\w+)/.exec(className || "");
@@ -505,10 +353,127 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
                     );
                   },
                 }}
-              >
-                {msg.text || ""}
-              </Markdown>
-            </div>
+          >
+            {text}
+          </Markdown>
+        );
+
+        // ── Render ──
+        return (
+          <div key={msg.id} className="group flex flex-col items-start w-full space-y-3">
+            {streamItems.map((item) => {
+              if (item.type === "thought") {
+                const isThoughtCollapsed =
+                  collapsedThoughts[item.key] ?? (item.tp.isCollapsed ?? false);
+                return (
+                  <div key={item.key} className="w-full text-xs transition-all font-sans">
+                    <button
+                      onClick={() => toggleThought(item.key)}
+                      className="flex items-center gap-1.5 text-xs text-gray-400 dark:text-zinc-500 hover:text-gray-600 dark:hover:text-zinc-300 cursor-pointer select-none py-0.5 transition-colors font-sans"
+                    >
+                      {isThoughtCollapsed ? (
+                        <ChevronRight className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500" />
+                      ) : (
+                        <ChevronDown className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500" />
+                      )}
+                      <span className="font-sans text-xs tracking-tight">
+                        {t("思考", "Thinking")}
+                      </span>
+                      {item.tp.durationSec && (
+                        <span className="text-[11px] text-gray-400 dark:text-zinc-500 font-mono opacity-80">
+                          ({item.tp.durationSec}s)
+                        </span>
+                      )}
+                    </button>
+                    {!isThoughtCollapsed && (
+                      <div className="mt-1.5 pl-3 border-l border-gray-200 dark:border-zinc-800/80 text-xs text-gray-500 dark:text-zinc-400 leading-relaxed font-sans space-y-1 py-0.5 whitespace-pre-wrap">
+                        {item.tp.thoughtText}
+                      </div>
+                    )}
+                  </div>
+                );
+              }
+              if (item.type === "tool") {
+                return (
+                  <div key={item.key} className="w-full">
+                    <ToolInvocationCard
+                      tool={item.tool}
+                      onExecute={(toolId) => onApproval?.(true, toolId)}
+                      onReject={(toolId) => onApproval?.(false, toolId)}
+                    />
+                  </div>
+                );
+              }
+              if (item.type === "text") {
+                return (
+                  <div key={item.key} className="text-[13px] leading-relaxed text-gray-800 dark:text-zinc-200 w-full font-sans space-y-1">
+                    {renderMarkdown(item.text)}
+                  </div>
+                );
+              }
+              return null;
+            })}
+
+            {/* Fallback Tool Logs if no toolExecutions */}
+            {(!msg.toolExecutions || msg.toolExecutions.length === 0) &&
+              msg.toolLogs &&
+              msg.toolLogs.length > 0 && (
+                <div className="w-full">
+                  {msg.toolLogs.map((log, idx) => (
+                    <div
+                      key={idx}
+                      className="flex items-center gap-2 text-gray-600 dark:text-zinc-400 py-0.5 text-xs font-mono"
+                    >
+                      <Terminal className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 shrink-0" />
+                      <span>{log}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+            {/* 3.5 Plan Card (update_plan tool output) */}
+            {msg.planSteps && msg.planSteps.length > 0 && (
+              <div className="w-full mt-2 rounded-xl border border-gray-200/90 dark:border-[#2a2a2a] bg-[#f0f0f0] dark:bg-[#171717] p-4 text-xs font-sans space-y-3 shadow-2xs">
+                <div className="flex items-center gap-2 font-medium text-gray-700 dark:text-zinc-300">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-500" />
+                  <span>{t("任务计划", "Task Plan")}</span>
+                </div>
+                {msg.planExplanation && (
+                  <div className="text-xs text-gray-500 dark:text-zinc-400 leading-relaxed">
+                    {msg.planExplanation}
+                  </div>
+                )}
+                <div className="space-y-1">
+                  {msg.planSteps.map((step, i) => {
+                    const statusIcon =
+                      step.status === "completed" ? (
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                      ) : step.status === "in_progress" ? (
+                        <Loader2 className="w-3.5 h-3.5 text-blue-500 animate-spin shrink-0" />
+                      ) : step.status === "failed" ? (
+                        <XCircle className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+                      ) : (
+                        <div className="w-3.5 h-3.5 rounded-full border border-gray-300 dark:border-zinc-600 shrink-0" />
+                      );
+                    return (
+                      <div
+                        key={i}
+                        className={`flex items-center gap-2 py-1 px-2 rounded ${
+                          step.status === "in_progress"
+                            ? "bg-blue-50 dark:bg-blue-950/30 text-blue-800 dark:text-blue-200"
+                            : "text-gray-600 dark:text-zinc-400"
+                        }`}
+                      >
+                        {statusIcon}
+                        <span className={step.status === "completed" ? "line-through opacity-70" : ""}>
+                          {step.step}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             {/* 4. AGENT WORKING MODE: Clarification Questions (支持 Questions 交互面板与 Answers 回答展示卡片) */}
             {msg.clarificationQuestions && msg.clarificationQuestions.length > 0 && (() => {

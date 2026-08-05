@@ -3,6 +3,7 @@ import { motion } from "motion/react";
 import { useSettings, UserProfile } from "../context/SettingsContext";
 import { useToast } from "../context/ToastContext";
 import { CodexLogo } from "./CodexLogo";
+import { ServerAddressSelector } from "./ServerAddressSelector";
 import {
   Mail,
   Eye,
@@ -826,8 +827,10 @@ export const LoginPage: React.FC = () => {
               </span>
             </div>
             
-            {/* Localization and Theme Switcher aligned beautifully on the right */}
-            <div className="flex items-center gap-1.5 ml-auto">
+            {/* Server address selector + Theme/Lang controls */}
+            <div className="flex items-center gap-2 ml-auto">
+              <ServerAddressSelector variant="login" />
+
               <button
                 onClick={() => setLanguage(language === "zh-CN" ? "en-US" : "zh-CN")}
                 className="px-2 py-1 text-gray-500 dark:text-zinc-400 hover:bg-gray-200/40 dark:hover:bg-zinc-900 rounded-md transition-all border border-gray-200/50 dark:border-zinc-800/60 flex items-center gap-1.5 cursor-pointer text-[10px] font-semibold"

@@ -98,6 +98,25 @@ export async function listThreads(
   return json?.data?.threads ?? json?.threads ?? json?.data ?? [];
 }
 
+/** Load the full message history for a thread. */
+export async function loadHistory(
+  baseUrl: string,
+  token: string,
+  threadId: string
+): Promise<{ threadId: string; messages: any[] }> {
+  const res = await apiFetch(
+    `${baseUrl}/api/chat/threads/${encodeURIComponent(threadId)}/messages`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  if (!res.ok) throw new Error(await detail(res));
+  const json = await res.json();
+  const data = json?.data ?? json;
+  return {
+    threadId: data.thread_id ?? data.threadId ?? threadId,
+    messages: data.messages ?? [],
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Send + stream
 // ---------------------------------------------------------------------------
@@ -108,7 +127,8 @@ export async function sendMessage(
   token: string,
   threadId: string,
   modelId: string,
-  text: string
+  text: string,
+  approvalPolicy?: string,
 ): Promise<SendMessageResult> {
   const res = await apiFetch(`${baseUrl}/api/chat/threads/${encodeURIComponent(threadId)}/messages`, {
     method: "POST",
@@ -116,7 +136,7 @@ export async function sendMessage(
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,
     },
-    body: JSON.stringify({ model_id: modelId, text }),
+    body: JSON.stringify({ model_id: modelId, text, approval_policy: approvalPolicy || "unless_trusted" }),
   });
   if (!res.ok) throw new Error(await detail(res));
   const json = await res.json();

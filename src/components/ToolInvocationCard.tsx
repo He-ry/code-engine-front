@@ -3,8 +3,19 @@ import {
   ChevronDown,
   ChevronRight,
   Terminal,
-  FileCode2,
-  Package,
+  FileText,
+  FilePen,
+  FileDiff,
+  Search,
+  FileSearch,
+  Globe,
+  Image,
+  MessageCircle,
+  HelpCircle,
+  Clock,
+  Timer,
+  ListTodo,
+  Plug,
   Wrench,
   CheckCircle2,
   XCircle,
@@ -40,6 +51,11 @@ export const ToolInvocationCard: React.FC<ToolInvocationCardProps> = ({
     setResultText(tool.result || null);
   }, [tool.result]);
 
+  // Classify the error using the backend-provided errorReason enum.
+  const isRejectedByUser = status === "error" && tool.errorReason === "user_denied";
+  const isApprovalTimeout = status === "error" && tool.errorReason === "approval_timeout";
+  const isCancelled = status === "error" && (tool.wasAborted || tool.errorReason === "cancelled");
+
   const handleExecuteClick = () => {
     setStatus("running");
     if (onExecute) {
@@ -58,15 +74,67 @@ export const ToolInvocationCard: React.FC<ToolInvocationCardProps> = ({
 
   const handleRejectClick = () => {
     setStatus("error");
-    setResultText(t("用户已拒绝此工具调用", "User rejected this tool invocation"));
+    // resultText will be overwritten by the backend's item_completed SSE event.
     if (onReject) onReject(tool.id);
   };
 
-  // Determine Icon & Category
+  // Determine Icon & Category — explicit per-tool mapping
   const toolNameLower = tool.name.toLowerCase();
-  let isFile = toolNameLower.includes("file") || toolNameLower.includes("create") || toolNameLower.includes("edit");
-  let isPkg = toolNameLower.includes("package") || toolNameLower.includes("install") || toolNameLower.includes("npm");
-  
+
+  const getToolIcon = () => {
+    // Exact matches first
+    if (toolNameLower === "bash")
+      return { icon: Terminal, color: "text-emerald-500", bg: "bg-emerald-50 dark:bg-emerald-950/40" };
+
+    if (toolNameLower === "read_file")
+      return { icon: FileText, color: "text-blue-500", bg: "bg-blue-50 dark:bg-blue-950/40" };
+
+    if (toolNameLower === "write_file")
+      return { icon: FilePen, color: "text-orange-500", bg: "bg-orange-50 dark:bg-orange-950/40" };
+
+    if (toolNameLower === "apply_patch")
+      return { icon: FileDiff, color: "text-amber-500", bg: "bg-amber-50 dark:bg-amber-950/40" };
+
+    if (toolNameLower === "glob")
+      return { icon: Search, color: "text-cyan-500", bg: "bg-cyan-50 dark:bg-cyan-950/40" };
+
+    if (toolNameLower === "grep")
+      return { icon: FileSearch, color: "text-violet-500", bg: "bg-violet-50 dark:bg-violet-950/40" };
+
+    if (toolNameLower === "web_search")
+      return { icon: Globe, color: "text-sky-500", bg: "bg-sky-50 dark:bg-sky-950/40" };
+
+    if (toolNameLower === "view_image")
+      return { icon: Image, color: "text-pink-500", bg: "bg-pink-50 dark:bg-pink-950/40" };
+
+    if (toolNameLower === "ask_user")
+      return { icon: HelpCircle, color: "text-indigo-500", bg: "bg-indigo-50 dark:bg-indigo-950/40" };
+
+    if (toolNameLower === "current_time")
+      return { icon: Clock, color: "text-slate-500", bg: "bg-slate-50 dark:bg-slate-950/40" };
+
+    if (toolNameLower === "sleep")
+      return { icon: Timer, color: "text-gray-500", bg: "bg-gray-50 dark:bg-gray-950/40" };
+
+    if (toolNameLower === "update_plan")
+      return { icon: ListTodo, color: "text-teal-500", bg: "bg-teal-50 dark:bg-teal-950/40" };
+
+    // MCP / namespaced tools (contain "::")
+    if (tool.name.includes("__") || tool.name.includes("::"))
+      return { icon: Plug, color: "text-purple-500", bg: "bg-purple-50 dark:bg-purple-950/40" };
+
+    // Fallbacks by keyword
+    if (toolNameLower.includes("file") || toolNameLower.includes("create") || toolNameLower.includes("edit"))
+      return { icon: FilePen, color: "text-orange-500", bg: "bg-orange-50 dark:bg-orange-950/40" };
+
+    if (toolNameLower.includes("search") || toolNameLower.includes("find"))
+      return { icon: Search, color: "text-cyan-500", bg: "bg-cyan-50 dark:bg-cyan-950/40" };
+
+    return { icon: Wrench, color: "text-zinc-500", bg: "bg-zinc-100 dark:bg-zinc-800" };
+  };
+
+  const { icon: ToolIcon, color: iconColor, bg: iconBg } = getToolIcon();
+
   const displayCommand = tool.command || tool.description || tool.args || "";
 
   return (
@@ -89,16 +157,8 @@ export const ToolInvocationCard: React.FC<ToolInvocationCardProps> = ({
           </button>
 
           {/* 2. Tool Icon */}
-          <div className="w-5 h-5 rounded bg-gray-100 dark:bg-zinc-800 flex items-center justify-center shrink-0">
-            {isFile ? (
-              <FileCode2 className="w-3 h-3 text-blue-500" />
-            ) : isPkg ? (
-              <Package className="w-3 h-3 text-purple-500" />
-            ) : toolNameLower.includes("run") || toolNameLower.includes("exec") || toolNameLower.includes("command") ? (
-              <Terminal className="w-3 h-3 text-emerald-500" />
-            ) : (
-              <Wrench className="w-3 h-3 text-zinc-500" />
-            )}
+          <div className={`w-5 h-5 rounded flex items-center justify-center shrink-0 ${iconBg}`}>
+            <ToolIcon className={`w-3 h-3 ${iconColor}`} />
           </div>
 
           {/* 3. Tool Name and Command snippet directly inline */}
@@ -164,9 +224,28 @@ export const ToolInvocationCard: React.FC<ToolInvocationCardProps> = ({
               <span>{t("已执行", "Executed")}</span>
             </div>
           ) : status === "error" ? (
-            <div className="flex items-center gap-1 text-rose-500 font-medium text-xs">
-              <XCircle className="w-3.5 h-3.5" />
-              <span>{t("已拒绝", "Rejected")}</span>
+            <div className="flex items-center gap-1 font-medium text-xs" title={resultText || ""}>
+              {isRejectedByUser ? (
+                <>
+                  <XCircle className="w-3.5 h-3.5 text-rose-500" />
+                  <span className="text-rose-500">{t("已拒绝", "Rejected")}</span>
+                </>
+              ) : isApprovalTimeout ? (
+                <>
+                  <XCircle className="w-3.5 h-3.5 text-amber-500" />
+                  <span className="text-amber-500">{t("审批超时", "Timeout")}</span>
+                </>
+              ) : isCancelled ? (
+                <>
+                  <XCircle className="w-3.5 h-3.5 text-gray-400" />
+                  <span className="text-gray-400">{t("已中止", "Aborted")}</span>
+                </>
+              ) : (
+                <>
+                  <XCircle className="w-3.5 h-3.5 text-rose-500" />
+                  <span className="text-rose-500">{t("执行失败", "Failed")}</span>
+                </>
+              )}
             </div>
           ) : (
             <div className="flex items-center gap-1.5 text-blue-500 font-medium text-xs">
@@ -180,6 +259,30 @@ export const ToolInvocationCard: React.FC<ToolInvocationCardProps> = ({
       {/* Expanded Detail View */}
       {isExpanded && (
         <div className="mt-1 p-2.5 rounded-xl border border-gray-200/80 dark:border-zinc-800/80 bg-gray-50 dark:bg-zinc-950/60 font-mono text-[11px] space-y-2">
+          {/* Error tip banner — only for user-rejected, timeout, or cancelled */}
+          {(status === "error" && tool.errorReason && (isRejectedByUser || isApprovalTimeout || isCancelled)) && (
+            <div className={`px-2.5 py-2 rounded-lg font-sans text-[11px] ${
+              isRejectedByUser
+                ? "bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800/40 text-rose-700 dark:text-rose-300"
+                : isApprovalTimeout
+                ? "bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/40 text-amber-700 dark:text-amber-300"
+                : "bg-gray-100 dark:bg-zinc-800/60 border border-gray-200 dark:border-zinc-700 text-gray-500 dark:text-zinc-400"
+            }`}>
+              <div className="flex items-center gap-1.5 font-semibold">
+                {isRejectedByUser && t("🚫 用户已拒绝此操作", "🚫 User rejected this action")}
+                {isApprovalTimeout && t("⏱ 审批超时（120 秒）", "⏱ Approval timed out (120s)")}
+                {isCancelled && t("⏹ 操作已被中止", "⏹ Operation was aborted")}
+              </div>
+              {(isRejectedByUser || isApprovalTimeout || isCancelled) && (
+                <div className="mt-1 opacity-80">
+                  {isRejectedByUser && t("您拒绝了此工具的执行请求", "You rejected this tool's execution request")}
+                  {isApprovalTimeout && t("可在设置中调整审批策略，减少等待时间", "Adjust the approval policy in Settings to reduce waiting time")}
+                  {isCancelled && t("任务被取消，当前会话仍可继续", "Task was cancelled; the session can still continue")}
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="flex items-center justify-between text-gray-500 dark:text-zinc-400 font-sans text-[11px]">
             <span>{t("完整指令 / 参数：", "Full Command / Arguments:")}</span>
           </div>
@@ -190,7 +293,11 @@ export const ToolInvocationCard: React.FC<ToolInvocationCardProps> = ({
           {resultText && (
             <div className="space-y-1 pt-1">
               <div className="text-gray-500 dark:text-zinc-400 font-sans text-[11px]">{t("执行结果：", "Execution Result:")}</div>
-              <div className="p-2 rounded-lg bg-zinc-950 text-emerald-400 overflow-x-auto whitespace-pre-wrap max-h-36 border border-zinc-800">
+              <div className={`p-2 rounded-lg overflow-x-auto whitespace-pre-wrap max-h-36 border ${
+                status === "error" && !isCancelled
+                  ? "bg-red-950/30 border-red-800/60 text-red-300"
+                  : "bg-zinc-950 text-emerald-400 border-zinc-800"
+              }`}>
                 {resultText}
               </div>
             </div>

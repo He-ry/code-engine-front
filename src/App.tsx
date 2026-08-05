@@ -24,6 +24,7 @@ import {
   approveTool,
   respondInput,
   interruptTurn,
+  loadHistory,
 } from "./lib/agentClient";
 import { listProjects, createProject } from "./lib/projectApi";
 import { DEFAULT_CHAT_MESSAGES, EN_DEFAULT_CHAT_MESSAGES } from "./data/mockData";
@@ -53,7 +54,7 @@ const getInitialSettingsState = () => {
 };
 
 export default function App() {
-  const { t, language, isLangSwitching, isThemeSwitching, theme, isLoggedIn, user, backendApiUrl, login, backendModels, defaultModel } = useSettings();
+  const { t, language, isLangSwitching, isThemeSwitching, theme, isLoggedIn, user, backendApiUrl, login, backendModels, defaultModel, approvalPolicy } = useSettings();
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
   const initialProjectId = getInitialProjectId();
@@ -402,6 +403,61 @@ export default function App() {
     threadIdRef.current = null;
   };
 
+  // Load an existing thread's message history
+  const handleSelectThread = async (threadId: string) => {
+    const baseUrl = backendApiUrl || "https://agent.hery.cloud";
+    const token = user?.token || "";
+    if (!token || !threadId) return;
+
+    try {
+      const result = await loadHistory(baseUrl, token, threadId);
+      const rawMessages = result.messages || [];
+
+      // Convert backend message format to ChatMessage[]
+      const chatMessages: ChatMessage[] = rawMessages.map((hm: any) => {
+        const msg: ChatMessage = {
+          id: hm.id || `msg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          sender: hm.sender || "ai",
+          text: hm.text || "",
+          timestamp: hm.timestamp
+            ? new Date(hm.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+            : "",
+        };
+
+        // Map tool executions
+        if (hm.toolExecutions && Array.isArray(hm.toolExecutions) && hm.toolExecutions.length > 0) {
+          msg.toolExecutions = hm.toolExecutions.map((te: any) => ({
+            id: te.id || "",
+            name: te.name || "tool",
+            command: te.command || "",
+            args: te.args || "{}",
+            description: te.command || "",
+            status: (te.status === "error" ? "error" : "success") as ToolExecution["status"],
+            result: te.result || "",
+            errorReason: te.errorReason || "",
+            createdAt: Date.now(),
+          }));
+        }
+
+        return msg;
+      });
+
+      setMessages(chatMessages);
+      threadIdRef.current = threadId;
+    } catch (err: any) {
+      console.warn("Failed to load thread history:", err);
+      window.dispatchEvent(
+        new CustomEvent("app:show_toast", {
+          detail: {
+            type: "error",
+            title: t("加载对话失败", "Failed to load conversation"),
+            description: err?.message || String(err),
+          },
+        })
+      );
+    }
+  };
+
   // Create project
   const handleCreateProject = async (name: string, gitUrl?: string) => {
     const baseUrl = backendApiUrl || "https://agent.hery.cloud";
@@ -531,22 +587,48 @@ export default function App() {
     return enabled?.id || enabled?.modelName || models[0]?.id || "";
   };
 
-  /** Apply one SSE agent event to the active AI message. */
+  /** Apply one SSE agent event to the active AI message.
+   *
+   *  Text segmentation strategy (no mutable flags — state is the source of truth):
+   *  - agent_message_delta always appends to the *last* text segment.
+   *  - item_started (tool) seals the current segment by appending an empty
+   *    placeholder — future deltas fill the placeholder.
+   *  - Multiple consecutive tools without intervening text only push one
+   *    placeholder (because the last segment is already empty).
+   */
   const handleAgentEvent = (
     ev: { type: string; data: any },
     aiMsgId: string
   ) => {
     const { type, data } = ev;
+    const now = Date.now();
     switch (type) {
       case "agent_message_delta": {
         const delta = data.delta || data.agentMessageDelta || "";
         if (!delta) break;
         setMessages((prev) =>
-          prev.map((m) =>
-            m.id === aiMsgId
-              ? { ...m, text: m.text + delta, agentStatus: "generating" }
-              : m
-          )
+          prev.map((m) => {
+            if (m.id !== aiMsgId) return m;
+            const segments = m.textSegments ? [...m.textSegments] : [];
+            if (segments.length === 0) {
+              segments.push({ text: "", createdAt: now });
+            }
+            const last = segments[segments.length - 1];
+            // If this is the first content filling an empty placeholder,
+            // update the timestamp so sorting reflects actual text time,
+            // not the earlier item_started / tool announcement.
+            const wasEmpty = last.text.length === 0;
+            segments[segments.length - 1] = {
+              text: last.text + delta,
+              createdAt: wasEmpty ? now : last.createdAt,
+            };
+            return {
+              ...m,
+              text: m.text + delta,
+              textSegments: segments,
+              agentStatus: "generating",
+            };
+          })
         );
         break;
       }
@@ -568,13 +650,12 @@ export default function App() {
             const lastToolTime = toolsExist ? (m.toolExecutions![m.toolExecutions!.length - 1].createdAt || 0) : 0;
             const lastBlockTime = lastBlock ? (lastBlock.createdAt || 0) : 0;
 
-            // If no block exists, or tools were executed after the last block started, start a new distinct block
             if (!lastBlock || (toolsExist && lastToolTime > lastBlockTime && lastBlock.thoughtText.trim().length > 0)) {
               list.push({
-                id: `tp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                id: `tp-${now}-${Math.random().toString(36).slice(2, 6)}`,
                 thoughtText: delta,
                 isCollapsed: false,
-                createdAt: Date.now(),
+                createdAt: now,
               });
             } else {
               list[list.length - 1] = {
@@ -587,7 +668,7 @@ export default function App() {
               ...m,
               agentStatus: "thinking",
               thinkingProcesses: list,
-              thinkingProcess: list[0], // fallback sync
+              thinkingProcess: list[0],
             };
           })
         );
@@ -608,17 +689,38 @@ export default function App() {
             }
 
             const newBlock: ThinkingProcess = {
-              id: `tp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              id: `tp-${now}-${Math.random().toString(36).slice(2, 6)}`,
               thoughtText: "",
               isCollapsed: false,
-              createdAt: Date.now(),
+              createdAt: now,
             };
 
             const updated = [...list, newBlock];
+            return { ...m, thinkingProcesses: updated, thinkingProcess: updated[0] };
+          })
+        );
+        break;
+      }
+      case "command_execution_output_delta": {
+        // Stream argument deltas (e.g. file content) to the matching
+        // tool card so the user sees real-time writing progress.
+        const deltaItemId = data.itemId || data.item_id || "";
+        const deltaText = data.delta || "";
+        if (!deltaItemId || !deltaText) break;
+        setMessages((prev) =>
+          prev.map((m) => {
+            if (m.id !== aiMsgId) return m;
             return {
               ...m,
-              thinkingProcesses: updated,
-              thinkingProcess: updated[0],
+              toolExecutions: (m.toolExecutions || []).map((te) =>
+                te.id === deltaItemId
+                  ? {
+                      ...te,
+                      contentDelta: (te.contentDelta || "") + deltaText,
+                      status: "running" as const,
+                    }
+                  : te
+              ),
             };
           })
         );
@@ -626,24 +728,50 @@ export default function App() {
       }
       case "item_started": {
         const item = data.item || {};
+        // ---- new agent_message = new LLM sampling loop iteration ----
+        // Start a fresh text segment so text across tool-execution
+        // boundaries (different loop iterations) never mixes.
+        if (item.type === "agent_message") {
+          setMessages((prev) =>
+            prev.map((m) => {
+              if (m.id !== aiMsgId) return m;
+              const segments = m.textSegments ? [...m.textSegments] : [];
+              const last = segments[segments.length - 1];
+              if (!last || last.text.length > 0) {
+                segments.push({ text: "", createdAt: now });
+              }
+              return { ...m, textSegments: segments };
+            })
+          );
+          break;
+        }
+        // ---- tool call announced ----
         if (item.type === "command_execution") {
+          const args = item.arguments || {};
           const exec: ToolExecution = {
-            id: item.id || item.callId || `te-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-            name: item.tool || item.toolName || "tool",
+            id: item.id || item.callId || `te-${now}-${Math.random().toString(36).slice(2, 7)}`,
+            name: item.toolName || item.tool || "tool",
             command: item.command || "",
+            args: typeof args === "string" ? args : JSON.stringify(args),
+            description: item.command || "",
             status: "running",
-            createdAt: Date.now(),
+            createdAt: now,
           };
           setMessages((prev) =>
-            prev.map((m) =>
-              m.id === aiMsgId
-                ? {
-                    ...m,
-                    agentStatus: "executing_tool",
-                    toolExecutions: [...(m.toolExecutions || []), exec],
-                  }
-                : m
-            )
+            prev.map((m) => {
+              if (m.id !== aiMsgId) return m;
+              const segments = m.textSegments ? [...m.textSegments] : [];
+              const last = segments[segments.length - 1];
+              if (!last || last.text.length > 0) {
+                segments.push({ text: "", createdAt: now });
+              }
+              return {
+                ...m,
+                agentStatus: "executing_tool",
+                toolExecutions: [...(m.toolExecutions || []), exec],
+                textSegments: segments,
+              };
+            })
           );
         }
         break;
@@ -653,22 +781,37 @@ export default function App() {
         if (item.type === "command_execution") {
           const id = item.id || item.callId || "";
           const status: ToolExecution["status"] =
-            item.status === "failed" ? "error" : "success";
+            item.status === "failed" || item.status === "declined" || item.status === "aborted" ? "error" : "success";
           const result =
             item.aggregatedOutput != null ? String(item.aggregatedOutput) : "";
+          const errorReason = item.errorReason || "";
+          const wasAborted = item.wasAborted === true;
+          const args = item.arguments || null;
           setMessages((prev) =>
             prev.map((m) =>
               m.id === aiMsgId
                 ? {
                     ...m,
                     toolExecutions: (m.toolExecutions || []).map((te) =>
-                      te.id === id ? { ...te, status, result } : te
+                      te.id === id
+                        ? {
+                            ...te,
+                            status,
+                            result,
+                            errorReason,
+                            wasAborted,
+                            ...(args ? { args: typeof args === "string" ? args : JSON.stringify(args) } : {}),
+                            ...(item.command ? { command: item.command, description: item.command } : {}),
+                          }
+                        : te
                     ),
                   }
                 : m
             )
           );
         }
+        // item_completed (agent_message) — no action needed;
+        // text segments are already sealed by the last tool.
         break;
       }
       case "user_input_required": {
@@ -702,16 +845,85 @@ export default function App() {
         }
         break;
       }
+      case "command_execution_output_delta": {
+        const delta = data.delta || "";
+        const itemId = data.itemId || data.item_id || "";
+        if (!delta || !itemId) break;
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === aiMsgId
+              ? {
+                  ...m,
+                  toolExecutions: (m.toolExecutions || []).map((te) =>
+                    te.id === itemId
+                      ? { ...te, result: (te.result || "") + delta }
+                      : te
+                  ),
+                }
+              : m
+          )
+        );
+        break;
+      }
+      case "turn_complete": {
+        // Mark streaming complete and record final message text
+        const finalMsg = data.finalMessage || data.final_message || "";
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === aiMsgId
+              ? {
+                  ...m,
+                  agentStatus: "completed",
+                  isStreaming: false,
+                  ...(finalMsg && !m.text ? { text: finalMsg } : {}),
+                }
+              : m
+          )
+        );
+        break;
+      }
       case "approval_required": {
         const approvalId = data.approvalId || data.approval_id || "";
+        const toolName = data.toolName || data.tool_name || "";
+        const args = data.arguments || {};
         setPendingApprovals((prev) => ({
           ...prev,
-          [approvalId]: {
-            approvalId,
-            toolName: data.toolName || data.tool_name || "",
-            arguments: data.arguments || {},
-          },
+          [approvalId]: { approvalId, toolName, arguments: args },
         }));
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === aiMsgId
+              ? {
+                  ...m,
+                  toolExecutions: (m.toolExecutions || []).map((te) =>
+                    te.id === approvalId
+                      ? { ...te, status: "pending" as const }
+                      : te
+                  ),
+                }
+              : m
+          )
+        );
+        break;
+      }
+      case "plan_delta": {
+        const explanation = data.explanation || "";
+        const plan: Array<{ step: string; status: string }> = data.plan || [];
+        if (plan.length === 0) break;
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === aiMsgId
+              ? {
+                  ...m,
+                  planSteps: plan.map((p: any) => ({
+                    step: p.step || "",
+                    status: (p.status || "pending") as "pending" | "in_progress" | "completed" | "failed",
+                  })),
+                  planExplanation: explanation || m.planExplanation || "",
+                }
+              : m
+          )
+        );
         break;
       }
       case "error": {
@@ -772,7 +984,11 @@ export default function App() {
   const handleApproval = async (approved: boolean, approvalId?: string) => {
     const threadId = threadIdRef.current;
     const effectiveApprovalId = approvalId || Object.keys(pendingApprovals)[0];
-    if (!effectiveApprovalId || !threadId) return;
+    if (!effectiveApprovalId || !threadId) {
+      if (!threadId) console.warn("handleApproval: no threadId");
+      if (!effectiveApprovalId) console.warn("handleApproval: no approvalId");
+      return;
+    }
     setPendingApprovals((prev) => {
       const next = { ...prev };
       delete next[effectiveApprovalId];
@@ -786,8 +1002,22 @@ export default function App() {
         effectiveApprovalId,
         approved
       );
-    } catch (e) {
-      console.warn("Approval failed:", e);
+    } catch (e: any) {
+      console.warn("Approval API call failed:", e?.message || e);
+      // Restore pending state so the user can retry
+      setPendingApprovals((prev) => ({
+        ...prev,
+        [effectiveApprovalId]: { approvalId: effectiveApprovalId, toolName: "", arguments: {} },
+      }));
+      window.dispatchEvent(
+        new CustomEvent("app:show_toast", {
+          detail: {
+            type: "error",
+            title: t("审批请求失败", "Approval request failed"),
+            description: e?.message || String(e),
+          },
+        })
+      );
     }
   };
 
@@ -857,7 +1087,7 @@ export default function App() {
       }
 
       // 2. Submit the user message (agent runs in the background).
-      await sendMessage(baseUrl, token, threadId, modelId, text);
+      await sendMessage(baseUrl, token, threadId, modelId, text, approvalPolicy);
 
       // 3. Stream agent events and render them onto the active message.
       await streamChat(baseUrl, token, threadId, (ev) => {
@@ -1020,6 +1250,7 @@ export default function App() {
           }}
           onNewTask={handleNewTask}
           onCreateProject={handleCreateProject}
+          onSelectThread={handleSelectThread}
           pinned={sidebarPinned}
           isOpen={isSidebarOpen}
           onTogglePin={() => setSidebarPinned(!sidebarPinned)}
