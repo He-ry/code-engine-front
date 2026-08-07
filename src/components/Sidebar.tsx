@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { useSettings } from "../context/SettingsContext";
 import {
@@ -13,6 +13,8 @@ import {
   ChevronRight,
   ChevronDown,
   MessageSquare,
+  Trash2,
+  Pencil,
   User,
   PieChart,
   LogOut,
@@ -82,6 +84,8 @@ interface SidebarProps {
   onNewTask: () => void;
   onCreateProject?: (name: string, gitUrl?: string) => void;
   onSelectThread?: (threadId: string) => void;
+  onDeleteThread?: (threadId: string, projectId: string) => void;
+  onRenameThread?: (threadId: string, projectId: string, newName: string) => void;
   pinned: boolean;
   isOpen: boolean;
   onTogglePin?: () => void;
@@ -97,6 +101,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onNewTask,
   onCreateProject,
   onSelectThread,
+  onDeleteThread,
+  onRenameThread,
   pinned,
   isOpen,
   onTogglePin,
@@ -116,6 +122,21 @@ export const Sidebar: React.FC<SidebarProps> = ({
     [activeProjectId]: true,
   });
   const [projectThreads, setProjectThreads] = useState<Record<string, any[]>>({});
+  const [deletingThreadId, setDeletingThreadId] = useState<string | null>(null);
+  const [menuThreadId, setMenuThreadId] = useState<string | null>(null);
+  const [editingThreadId, setEditingThreadId] = useState<string | null>(null);
+  const [editName, setEditName] = useState("");
+  const editInputRef = useRef<HTMLInputElement>(null);
+  const [scrollingThreadId, setScrollingThreadId] = useState<string | null>(null);
+  const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Focus rename input when editing starts
+  useEffect(() => {
+    if (editingThreadId && editInputRef.current) {
+      editInputRef.current.focus();
+      editInputRef.current.select();
+    }
+  }, [editingThreadId]);
 
   const handleCreateProject = () => {
     const name = newProjectName.trim();
@@ -141,7 +162,19 @@ export const Sidebar: React.FC<SidebarProps> = ({
     }
   };
 
-  // Load threads when a project becomes expanded
+  // Auto-load threads for the active project on switch
+  React.useEffect(() => {
+    if (activeProjectId) {
+      loadProjectThreads(activeProjectId);
+      // Also auto-expand the active project in the tree
+      setExpandedProjects((prev) => {
+        if (prev[activeProjectId]) return prev;
+        return { ...prev, [activeProjectId]: true };
+      });
+    }
+  }, [activeProjectId]);
+
+  // Load threads when a project becomes expanded via toggle
   React.useEffect(() => {
     for (const [projectId, isExpanded] of Object.entries(expandedProjects)) {
       if (isExpanded) {
@@ -177,6 +210,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
     >
       <div className="w-[224px] h-full flex flex-col shrink-0 overflow-hidden">
 
+            {/* Scroll-text animation for long conversation names */}
+            <style>{`
+              @keyframes textscroll {
+                0% { transform: translateX(0%); }
+                20% { transform: translateX(0%); }
+                100% { transform: translateX(calc(-100% + 100px)); }
+              }
+              .animate-textscroll {
+                animation: textscroll 4s ease-in-out infinite alternate;
+              }
+            `}</style>
             {/* Main Actions */}
             <div className="p-2 pt-2 space-y-1 shrink-0 font-sans">
               <button
@@ -321,16 +365,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         className={`group cursor-pointer rounded-md transition-colors relative ${
                           isActive
                             ? "font-medium text-gray-900 dark:text-zinc-100"
-                            : "hover:bg-gray-200/50 dark:hover:bg-zinc-800/50 text-gray-700 dark:text-zinc-300"
+                            : "text-gray-700 dark:text-zinc-300"
                         }`}
                       >
-                        {isActive && (
-                          <motion.div
-                            layoutId="activeProjectIndicator"
-                            className="absolute inset-0 bg-gray-200/80 dark:bg-zinc-800 rounded-md z-0"
-                            transition={{ type: "spring", stiffness: 450, damping: 32 }}
-                          />
-                        )}
                         <div
                           onClick={() => onSelectProject(proj.id)}
                           className="p-2 flex items-center justify-between relative z-10"
@@ -405,16 +442,169 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                   </div>
                                 );
                               }
-                              return threads.map((thread: any) => (
-                                <div
-                                  key={thread.id}
-                                  onClick={() => onSelectThread?.(thread.id)}
-                                  className="flex items-center gap-1.5 py-1 px-1.5 hover:bg-gray-300/40 dark:hover:bg-zinc-800/80 rounded text-gray-700 dark:text-zinc-300 cursor-pointer transition-colors"
-                                >
-                                  <MessageSquare className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 shrink-0" />
-                                  <span className="truncate">{thread.name || thread.last_message_preview || thread.id}</span>
+                              return threads.map((thread: any) => {
+                                const createdAt = thread.created_at || thread.createdAt;
+                                const timeLabel = createdAt
+                                  ? String(new Date(createdAt).getMonth() + 1).padStart(2, "0") +
+                                    "-" +
+                                    String(new Date(createdAt).getDate()).padStart(2, "0")
+                                  : "";
+                                const currentName = thread.name || thread.last_message_preview || thread.id;
+                                const isEditing = editingThreadId === thread.id;
+                                const isDeleting = deletingThreadId === thread.id;
+                                return (
+                                <div key={thread.id} className="relative">
+                                  <div
+                                    onClick={() => onSelectThread?.(thread.id)}
+                                    className="flex items-center gap-1.5 py-1 px-1.5 hover:bg-gray-300/40 dark:hover:bg-zinc-800/80 rounded text-gray-700 dark:text-zinc-300 cursor-pointer transition-colors group/thread"
+                                    title={timeLabel || undefined}
+                                    onMouseEnter={(e) => {
+                                      const nameEl = e.currentTarget.querySelector<HTMLElement>(".thread-name");
+                                      if (nameEl && nameEl.scrollWidth > nameEl.clientWidth) {
+                                        scrollTimerRef.current = setTimeout(() => setScrollingThreadId(thread.id), 800);
+                                      }
+                                    }}
+                                    onMouseLeave={() => {
+                                      if (scrollTimerRef.current) { clearTimeout(scrollTimerRef.current); scrollTimerRef.current = null; }
+                                      setScrollingThreadId(null);
+                                    }}
+                                  >
+                                    <MessageSquare className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 shrink-0" />
+                                    {isEditing ? (
+                                      <input
+                                        ref={editInputRef}
+                                        value={editName}
+                                        onChange={(e) => setEditName(e.target.value)}
+                                        onKeyDown={(e) => {
+                                          if (e.key === "Enter") {
+                                            e.preventDefault();
+                                            const trimmed = editName.trim();
+                                            if (trimmed && trimmed !== currentName) {
+                                              onRenameThread?.(thread.id, proj.id, trimmed);
+                                              setProjectThreads((prev) => {
+                                                const existing = prev[proj.id];
+                                                if (!existing) return prev;
+                                                return { ...prev, [proj.id]: existing.map((t: any) => t.id === thread.id ? { ...t, name: trimmed } : t) };
+                                              });
+                                            }
+                                            setEditingThreadId(null);
+                                          } else if (e.key === "Escape") {
+                                            setEditingThreadId(null);
+                                          }
+                                        }}
+                                        onBlur={() => setEditingThreadId(null)}
+                                        onClick={(e) => e.stopPropagation()}
+                                        className="w-28 bg-gray-200/50 dark:bg-zinc-700/50 rounded px-1.5 py-px text-[13px] text-gray-700 dark:text-zinc-200 outline-none ring-1 ring-inset ring-gray-300 dark:ring-zinc-600 font-sans"
+                                      />
+                                    ) : (
+                                      <span
+                                        className="truncate flex-1 relative overflow-hidden thread-name"
+                                        onDoubleClick={(e) => {
+                                          e.stopPropagation();
+                                          setEditingThreadId(thread.id);
+                                          setEditName(currentName);
+                                        }}
+                                      >
+                                        <span
+                                          className={`inline-block whitespace-nowrap ${
+                                            scrollingThreadId === thread.id ? "animate-textscroll" : ""
+                                          }`}
+                                        >
+                                          {currentName}
+                                        </span>
+                                      </span>
+                                    )}
+                                    {timeLabel && !isEditing && (
+                                      <span className="hidden group-hover/thread:inline text-[10px] text-gray-400 dark:text-zinc-500 font-mono shrink-0 whitespace-nowrap">
+                                        {timeLabel}
+                                      </span>
+                                    )}
+                                    {/* More actions button */}
+                                    <div className="relative">
+                                      <button
+                                        className="hidden group-hover/thread:flex items-center justify-center w-5 h-5 rounded hover:bg-gray-200 dark:hover:bg-zinc-700 text-gray-400 hover:text-gray-600 dark:hover:text-zinc-300 shrink-0 transition-colors"
+                                        title={t("更多操作", "More")}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setMenuThreadId(menuThreadId === thread.id ? null : thread.id);
+                                        }}
+                                      >
+                                        <MoreHorizontal className="w-3 h-3" />
+                                      </button>
+                                      {/* Dropdown menu */}
+                                      {menuThreadId === thread.id && (
+                                        <>
+                                          <div className="fixed inset-0 z-40" onClick={() => setMenuThreadId(null)} />
+                                          <div className="absolute right-0 top-full mt-1 z-50 rounded-md border border-gray-200 dark:border-zinc-800 bg-white dark:bg-[#1a1a1e] shadow-xl shadow-black/5 dark:shadow-black/30 p-1 text-xs font-sans w-32">
+                                            <button
+                                              className="w-full px-3 py-1.5 text-left text-gray-700 dark:text-zinc-300 hover:bg-gray-300/40 dark:hover:bg-zinc-800/80 rounded transition-colors cursor-pointer flex items-center gap-2 text-[12px]"
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                setMenuThreadId(null);
+                                                setEditingThreadId(thread.id);
+                                                setEditName(currentName);
+                                              }}
+                                            >
+                                              <Pencil className="w-3 h-3 text-gray-400" />
+                                              {t("重命名", "Rename")}
+                                            </button>
+                                            <button
+                                              className="w-full px-3 py-1.5 text-left text-gray-700 dark:text-zinc-300 hover:bg-gray-300/40 dark:hover:bg-zinc-800/80 rounded transition-colors cursor-pointer flex items-center gap-2 text-[12px]"
+                                              onClick={() => {
+                                                setMenuThreadId(null);
+                                                setDeletingThreadId(thread.id);
+                                              }}
+                                            >
+                                              <Trash2 className="w-3 h-3 text-gray-400" />
+                                              {t("删除", "Delete")}
+                                            </button>
+                                          </div>
+                                        </>
+                                      )}
+                                    </div>
+                                  </div>
+
+                                  {/* Delete confirm popover */}
+                                  {isDeleting && (
+                                    <>
+                                      <div className="fixed inset-0 z-40" onClick={() => setDeletingThreadId(null)} />
+                                      <div className="absolute right-0 top-full mt-1 z-50 rounded-md border border-gray-200 dark:border-zinc-800 bg-white dark:bg-[#1a1a1e] shadow-xl shadow-black/5 dark:shadow-black/30 p-4 text-xs font-sans w-56">
+                                        <p className="text-gray-700 dark:text-zinc-300 mb-3 leading-relaxed text-[13px]">
+                                          {t("删除后无法恢复，确定删除吗？", "This action cannot be undone. Are you sure?")}
+                                        </p>
+                                        <div className="flex justify-end gap-2">
+                                          <button
+                                            onClick={() => setDeletingThreadId(null)}
+                                            className="px-3 py-1.5 rounded-md text-gray-500 dark:text-zinc-400 hover:bg-gray-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer text-[12px] font-medium"
+                                          >
+                                            {t("取消", "Cancel")}
+                                          </button>
+                                          <button
+                                            onClick={async () => {
+                                              await onDeleteThread?.(thread.id, proj.id);
+                                              setDeletingThreadId(null);
+                                              setProjectThreads((prev) => {
+                                                const existing = prev[proj.id];
+                                                if (!existing) return prev;
+                                                return { ...prev, [proj.id]: existing.filter((t: any) => t.id !== thread.id) };
+                                              });
+                                              window.dispatchEvent(
+                                                new CustomEvent("app:show_toast", {
+                                                  detail: { type: "success", title: t("删除成功", "Deleted successfully") },
+                                                })
+                                              );
+                                            }}
+                                            className="px-3 py-1.5 rounded-md bg-gray-800 dark:bg-zinc-100 hover:bg-gray-900 dark:hover:bg-white text-white dark:text-gray-900 transition-colors cursor-pointer text-[12px] font-medium"
+                                          >
+                                            {t("删除", "Delete")}
+                                          </button>
+                                        </div>
+                                      </div>
+                                    </>
+                                  )}
                                 </div>
-                              ));
+                                );
+                              });
                             })()}
                           </div>
                         )}

@@ -148,7 +148,6 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
       {messages.map((msg, msgIdx) => {
         const isUser = msg.sender === "user";
         const isLiked = likedMessages[msg.id];
-        const isThoughtCollapsed = collapsedThoughts[msg.id] ?? (msg.thinkingProcess?.isCollapsed ?? false);
         const isLastMessage = msgIdx === messages.length - 1;
 
         if (isUser) {
@@ -363,8 +362,9 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
           <div key={msg.id} className="group flex flex-col items-start w-full space-y-3">
             {streamItems.map((item) => {
               if (item.type === "thought") {
+                // Default: expanded during streaming, collapsed when done
                 const isThoughtCollapsed =
-                  collapsedThoughts[item.key] ?? (item.tp.isCollapsed ?? false);
+                  collapsedThoughts[item.key] ?? !msg.isStreaming;
                 return (
                   <div key={item.key} className="w-full text-xs transition-all font-sans">
                     <button

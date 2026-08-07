@@ -58,10 +58,12 @@ export async function createThread(
   token: string,
   modelId: string,
   name = "New Chat",
-  projectId?: string
+  projectId?: string,
+  approvalPolicy?: string,
 ): Promise<ThreadInfo> {
   const body: Record<string, string> = { model_id: modelId, name };
   if (projectId) body.project_id = projectId;
+  if (approvalPolicy) body.approval_policy = approvalPolicy;
 
   const res = await apiFetch(`${baseUrl}/api/chat/threads`, {
     method: "POST",
@@ -96,6 +98,40 @@ export async function listThreads(
   if (!res.ok) throw new Error(await detail(res));
   const json = await res.json();
   return json?.data?.threads ?? json?.threads ?? json?.data ?? [];
+}
+
+/** Rename a conversation thread. */
+export async function renameThread(
+  baseUrl: string,
+  token: string,
+  threadId: string,
+  name: string
+): Promise<void> {
+  const res = await apiFetch(
+    `${baseUrl}/api/chat/threads/${encodeURIComponent(threadId)}`,
+    {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ name }),
+    }
+  );
+  if (!res.ok) throw new Error(await detail(res));
+}
+
+/** Delete a conversation thread and all associated history. */
+export async function deleteThread(
+  baseUrl: string,
+  token: string,
+  threadId: string
+): Promise<void> {
+  const res = await apiFetch(
+    `${baseUrl}/api/chat/threads/${encodeURIComponent(threadId)}`,
+    { method: "DELETE", headers: { Authorization: `Bearer ${token}` } }
+  );
+  if (!res.ok) throw new Error(await detail(res));
 }
 
 /** Load the full message history for a thread. */

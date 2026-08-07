@@ -35,6 +35,52 @@ import {
 } from "lucide-react";
 import { OpenTab } from "../types";
 
+// ── highlight.js syntax highlighting ──
+import hljs from "highlight.js/lib/core";
+import python from "highlight.js/lib/languages/python";
+import javascript from "highlight.js/lib/languages/javascript";
+import typescript from "highlight.js/lib/languages/typescript";
+import json from "highlight.js/lib/languages/json";
+import yaml from "highlight.js/lib/languages/yaml";
+import css from "highlight.js/lib/languages/css";
+import xml from "highlight.js/lib/languages/xml";
+import markdown from "highlight.js/lib/languages/markdown";
+import bash from "highlight.js/lib/languages/bash";
+import sql from "highlight.js/lib/languages/sql";
+import java from "highlight.js/lib/languages/java";
+import c from "highlight.js/lib/languages/c";
+import cpp from "highlight.js/lib/languages/cpp";
+import go from "highlight.js/lib/languages/go";
+import rust from "highlight.js/lib/languages/rust";
+import kotlin from "highlight.js/lib/languages/kotlin";
+import php from "highlight.js/lib/languages/php";
+import swift from "highlight.js/lib/languages/swift";
+import ruby from "highlight.js/lib/languages/ruby";
+import dockerfile from "highlight.js/lib/languages/dockerfile";
+import scss from "highlight.js/lib/languages/scss";
+
+hljs.registerLanguage("python", python);
+hljs.registerLanguage("javascript", javascript);
+hljs.registerLanguage("typescript", typescript);
+hljs.registerLanguage("json", json);
+hljs.registerLanguage("yaml", yaml);
+hljs.registerLanguage("css", css);
+hljs.registerLanguage("xml", xml);
+hljs.registerLanguage("markdown", markdown);
+hljs.registerLanguage("bash", bash);
+hljs.registerLanguage("sql", sql);
+hljs.registerLanguage("java", java);
+hljs.registerLanguage("c", c);
+hljs.registerLanguage("cpp", cpp);
+hljs.registerLanguage("go", go);
+hljs.registerLanguage("rust", rust);
+hljs.registerLanguage("kotlin", kotlin);
+hljs.registerLanguage("php", php);
+hljs.registerLanguage("swift", swift);
+hljs.registerLanguage("ruby", ruby);
+hljs.registerLanguage("dockerfile", dockerfile);
+hljs.registerLanguage("scss", scss);
+
 interface CodeEditorProps {
   tabs: OpenTab[];
   activeTabPath: string | null;
@@ -60,6 +106,35 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
 }) => {
   const { t } = useSettings();
   const { showSuccess, showInfo } = useToast();
+
+  // ── Language inference from file extension ──
+  const getLanguage = (filename?: string): string => {
+    if (!filename) return "javascript";
+    const ext = filename.split(".").pop()?.toLowerCase();
+    switch (ext) {
+      case "py": return "python";
+      case "ts": case "tsx": return "typescript";
+      case "js": case "jsx": case "mjs": case "cjs": return "javascript";
+      case "json": return "json";
+      case "yaml": case "yml": return "yaml";
+      case "css": case "scss": case "less": return "css";
+      case "html": case "htm": case "xml": case "svg": return "markup";
+      case "md": case "markdown": return "markdown";
+      case "sh": case "bash": case "zsh": return "bash";
+      case "sql": return "sql";
+      case "java": return "java";
+      case "c": case "h": return "c";
+      case "cpp": case "cc": case "cxx": case "hpp": return "cpp";
+      case "go": return "go";
+      case "rs": return "rust";
+      case "kt": case "kts": return "kotlin";
+      case "php": return "php";
+      case "swift": return "swift";
+      case "rb": return "ruby";
+      case "dockerfile": return "docker";
+      default: return "javascript";
+    }
+  };
   const [activeLine, setActiveLine] = useState<number>(1);
   const [activeCol, setActiveCol] = useState<number>(1);
 
@@ -252,235 +327,25 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
 
   const symbols = parseSymbols();
 
-  // Multi-language syntax highlighter
+  // ── highlight.js-based multi-language syntax highlighter ──
   const renderHighlightedLines = (codeLines: string[]) => {
-    let inDocstring = false;
+    const fileName = activeTab?.name;
+    const lang = getLanguage(fileName);
+    const langOk = hljs.getLanguage(lang) !== undefined;
 
     return codeLines.map((line, index) => {
       const lineNum = index + 1;
       const isCurrentLine = lineNum === activeLine;
-      const fileName = activeTab?.name?.toLowerCase() || "";
-
-      let lineContent: React.ReactNode = line;
-
-      // 1. Python (.py)
-      if (fileName.endsWith(".py")) {
-        if (line.trim().startsWith("#")) {
-          lineContent = <span className="text-emerald-700 dark:text-[#7ee787] font-medium italic">{line}</span>;
-        } else if (line.trim().startsWith('"""') || line.trim().endsWith('"""')) {
-          inDocstring = !inDocstring || line.trim().endsWith('"""');
-          lineContent = <span className="text-amber-600 dark:text-[#a5d6ff]">{line}</span>;
-        } else if (inDocstring) {
-          lineContent = <span className="text-amber-600 dark:text-[#a5d6ff]">{line}</span>;
-        } else {
-          const kwRegex = /\b(import|from|in|if|else|elif|def|class|return|as|try|except|finally|raise|with|while|for|not|and|or|None|True|False|self)\b/g;
-          const formattedTokens = line
-            .replace(kwRegex, "___KW_$1___")
-            .split(/(___KW_[^_]+___)/g);
-
-          lineContent = (
-            <span>
-              {formattedTokens.map((token, tIdx) => {
-                if (token.startsWith("___KW_") && token.endsWith("___")) {
-                  const kw = token.replace("___KW_", "").replace("___", "");
-                  return (
-                    <span key={tIdx} className="text-purple-600 dark:text-[#d2a8ff] font-bold">
-                      {kw}
-                    </span>
-                  );
-                }
-
-                if (token.includes("'") || token.includes('"')) {
-                  return (
-                    <span key={tIdx}>
-                      {token.split(/(["'][^"']*["'])/g).map((sPart, sIdx) => {
-                        if ((sPart.startsWith("'") && sPart.endsWith("'")) || (sPart.startsWith('"') && sPart.endsWith('"'))) {
-                          return (
-                            <span key={sIdx} className="text-emerald-600 dark:text-[#a5d6ff] font-medium">
-                              {sPart}
-                            </span>
-                          );
-                        }
-                        return sPart;
-                      })}
-                    </span>
-                  );
-                }
-
-                return token;
-              })}
-            </span>
-          );
+      let highlighted = "&nbsp;";
+      if (line && langOk) {
+        try {
+          const result = hljs.highlight(line, { language: lang });
+          highlighted = result.value;
+        } catch {
+          highlighted = line.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
         }
-      }
-      // 2. JS / TS / TSX / JSX
-      else if (
-        fileName.endsWith(".ts") ||
-        fileName.endsWith(".tsx") ||
-        fileName.endsWith(".js") ||
-        fileName.endsWith(".jsx") ||
-        fileName.endsWith(".mjs") ||
-        fileName.endsWith(".cjs")
-      ) {
-        const commentIdx = line.indexOf("//");
-        let codePart = line;
-        let commentPart = "";
-        if (commentIdx !== -1) {
-          const before = line.substring(0, commentIdx);
-          const singleQuotes = (before.match(/'/g) || []).length;
-          const doubleQuotes = (before.match(/"/g) || []).length;
-          const backticks = (before.match(/`/g) || []).length;
-          if (singleQuotes % 2 === 0 && doubleQuotes % 2 === 0 && backticks % 2 === 0) {
-            codePart = line.substring(0, commentIdx);
-            commentPart = line.substring(commentIdx);
-          }
-        }
-
-        const kwRegex = /\b(import|export|from|const|let|var|function|return|if|else|switch|case|break|default|try|catch|finally|throw|async|await|yield|class|extends|interface|type|typeof|instanceof|new|this|super|true|false|null|undefined|void|never|any|unknown)\b/g;
-
-        const formattedTokens = codePart
-          .replace(kwRegex, "___KW_$1___")
-          .split(/(___KW_[^_]+___)/g);
-
-        lineContent = (
-          <span>
-            {formattedTokens.map((token, tIdx) => {
-              if (token.startsWith("___KW_") && token.endsWith("___")) {
-                const kw = token.replace("___KW_", "").replace("___", "");
-                return (
-                  <span key={tIdx} className="text-purple-600 dark:text-[#d2a8ff] font-bold">
-                    {kw}
-                  </span>
-                );
-              }
-
-              if (token.includes("'") || token.includes('"') || token.includes("`")) {
-                return (
-                  <span key={tIdx}>
-                    {token.split(/(["'`][^"'`]*["'`])/g).map((sPart, sIdx) => {
-                      if (
-                        (sPart.startsWith("'") && sPart.endsWith("'")) ||
-                        (sPart.startsWith('"') && sPart.endsWith('"')) ||
-                        (sPart.startsWith("`") && sPart.endsWith("`"))
-                      ) {
-                        return (
-                          <span key={sIdx} className="text-emerald-600 dark:text-[#a5d6ff]">
-                            {sPart}
-                          </span>
-                        );
-                      }
-                      return sPart;
-                    })}
-                  </span>
-                );
-              }
-
-              return token;
-            })}
-            {commentPart && (
-              <span className="text-emerald-600/80 dark:text-[#7ee787] italic">{commentPart}</span>
-            )}
-          </span>
-        );
-      }
-      // 3. JSON (.json)
-      else if (fileName.endsWith(".json")) {
-        const jsonMatch = line.split(/(["'][^"']+["']\s*:)/g);
-        lineContent = (
-          <span>
-            {jsonMatch.map((part, pIdx) => {
-              if (/^["'][^"']+["']\s*:$/.test(part.trim())) {
-                return (
-                  <span key={pIdx} className="text-blue-600 dark:text-[#79c0ff] font-medium">
-                    {part}
-                  </span>
-                );
-              }
-              if (part.includes('"') || part.includes("'")) {
-                return (
-                  <span key={pIdx}>
-                    {part.split(/(["'][^"']*["'])/g).map((sPart, sIdx) => {
-                      if ((sPart.startsWith('"') && sPart.endsWith('"')) || (sPart.startsWith("'") && sPart.endsWith("'"))) {
-                        return (
-                          <span key={sIdx} className="text-emerald-600 dark:text-[#a5d6ff]">
-                            {sPart}
-                          </span>
-                        );
-                      }
-                      return sPart;
-                    })}
-                  </span>
-                );
-              }
-              return part;
-            })}
-          </span>
-        );
-      }
-      // 4. CSS / SCSS
-      else if (fileName.endsWith(".css") || fileName.endsWith(".scss")) {
-        if (line.trim().startsWith("/*")) {
-          lineContent = <span className="text-emerald-600/80 dark:text-[#7ee787] italic">{line}</span>;
-        } else if (line.includes(":")) {
-          const colonIdx = line.indexOf(":");
-          const propName = line.substring(0, colonIdx + 1);
-          const propVal = line.substring(colonIdx + 1);
-          lineContent = (
-            <span>
-              <span className="text-blue-600 dark:text-[#79c0ff] font-medium">{propName}</span>
-              <span className="text-amber-600 dark:text-[#ffa657]">{propVal}</span>
-            </span>
-          );
-        } else if (line.trim().startsWith(".") || line.trim().startsWith("#") || line.trim().startsWith("@")) {
-          lineContent = <span className="text-purple-600 dark:text-[#d2a8ff] font-bold">{line}</span>;
-        }
-      }
-      // 5. HTML / XML / SVG
-      else if (fileName.endsWith(".xml") || fileName.endsWith(".html") || fileName.endsWith(".svg")) {
-        if (line.trim().startsWith("<!--")) {
-          lineContent = <span className="text-gray-400 dark:text-[#8b949e] italic">{line}</span>;
-        } else {
-          lineContent = (
-            <span>
-              {line.split(/(<[^>]+>)/g).map((part, pIdx) => {
-                if (part.startsWith("<") && part.endsWith(">")) {
-                  return (
-                    <span key={pIdx} className="text-rose-600 dark:text-[#ff7b72] font-medium">
-                      {part}
-                    </span>
-                  );
-                }
-                return part;
-              })}
-            </span>
-          );
-        }
-      }
-      // 6. YAML (.yaml, .yml)
-      else if (fileName.endsWith(".yaml") || fileName.endsWith(".yml")) {
-        if (line.trim().startsWith("#")) {
-          lineContent = <span className="text-gray-400 dark:text-[#8b949e] italic">{line}</span>;
-        } else if (line.includes(":")) {
-          const colonIdx = line.indexOf(":");
-          const keyPart = line.substring(0, colonIdx + 1);
-          const valuePart = line.substring(colonIdx + 1);
-          lineContent = (
-            <span>
-              <span className="text-rose-700 dark:text-[#ff7b72] font-semibold">{keyPart}</span>
-              <span className="text-blue-600 dark:text-[#79c0ff]">{valuePart}</span>
-            </span>
-          );
-        }
-      }
-      // 7. Markdown (.md)
-      else if (fileName.endsWith(".md")) {
-        if (line.trim().startsWith("#")) {
-          lineContent = <span className="text-blue-600 dark:text-[#79c0ff] font-bold">{line}</span>;
-        } else if (line.trim().startsWith("```") || line.trim().startsWith("`")) {
-          lineContent = <span className="text-amber-600 dark:text-[#ffa657] font-mono">{line}</span>;
-        } else if (line.trim().startsWith("- ") || line.trim().startsWith("* ") || /^\d+\./.test(line.trim())) {
-          lineContent = <span className="text-purple-600 dark:text-[#d2a8ff]">{line}</span>;
-        }
+      } else if (line) {
+        highlighted = line.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
       }
 
       return (
@@ -492,7 +357,14 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
             isCurrentLine ? "bg-blue-50/80 dark:bg-[#21262d]/80 border-l-2 border-blue-600 dark:border-[#58a6ff] -ml-[2px]" : ""
           }`}
         >
-          {lineContent || <span className="inline-block w-full">&nbsp;</span>}
+          {line ? (
+            <span
+              className="text-gray-800 dark:text-zinc-200"
+              dangerouslySetInnerHTML={{ __html: highlighted }}
+            />
+          ) : (
+            <span className="inline-block w-full">&nbsp;</span>
+          )}
         </div>
       );
     });

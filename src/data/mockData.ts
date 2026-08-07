@@ -184,15 +184,7 @@ export const MENU_ATTACHMENTS = [
 
 export const AUTO_ACCEPT_MODES = [
   {
-    id: "auto-edit",
-    title: "自动接受编辑",
-    enTitle: "Auto Accept Edits",
-    desc: "自动接受工作区内文件编辑和常见文件系统命令",
-    enDesc: "Automatically accepts workspace file edits and standard file commands",
-    checked: true,
-  },
-  {
-    id: "auto-mode",
+    id: "never",
     title: "自动模式",
     enTitle: "Auto Mode",
     desc: "自动批准工具调用，并在后台进行安全检查",
@@ -200,11 +192,27 @@ export const AUTO_ACCEPT_MODES = [
     checked: false,
   },
   {
-    id: "bypass-perm",
-    title: "绕过权限检查",
-    enTitle: "Bypass Permissions",
-    desc: "跳过权限提示，但根目录和主目录删除操作仍会拦截",
-    enDesc: "Skips permission prompts, though root/home directory deletions are still blocked",
+    id: "on_request",
+    title: "仅拦截危险命令",
+    enTitle: "Dangerous Only",
+    desc: "rm/sudo/curl|sh 等才需确认",
+    enDesc: "Only prompt for rm/sudo/curl|sh etc.",
+    checked: false,
+  },
+  {
+    id: "unless_trusted",
+    title: "自动接受编辑",
+    enTitle: "Auto Accept Edits",
+    desc: "已知安全命令放行，其他需审批",
+    enDesc: "Known-safe read commands allowed, others prompt",
+    checked: true,
+  },
+  {
+    id: "always",
+    title: "始终询问",
+    enTitle: "Always Ask",
+    desc: "每个工具调用都要确认",
+    enDesc: "Prompt for every tool invocation",
     checked: false,
   },
 ];
@@ -603,7 +611,7 @@ export const EN_DEFAULT_CHAT_MESSAGES: ChatMessage[] = [
 2. Discovered ES Client and Redis connections established at module import without connection pool idle protection or failover.
 3. Found single-record loop deletion for Elasticsearch 'def_ims' index cleanup, resulting in low throughput.
 4. Designed Lazy Load initialization scheme with delete_by_query batch processing API and type annotations.`,
-      isCollapsed: false,
+      isCollapsed: true,
     },
     toolExecutions: [
       { id: "t1", name: "view_file", args: "path: 'app.py'", status: "success", result: "122 lines", duration: "110ms" },
@@ -707,7 +715,7 @@ Global configuration and runtime environment are in a healthy ready state!`,
       thoughtText: `1. User requests writing project file and preparing deployment.
 2. Evaluate edit actions: writing data cleanup component and launching in docker environment.
 3. To ensure production safety, ask for interactive confirmation on deployment mode and backup strategy.`,
-      isCollapsed: false,
+      isCollapsed: true,
     },
     toolExecutions: [
       { id: "t6", name: "create_file", args: "path: '/src/services/es_cleaner.py'", status: "success", result: "Wrote 38 lines", duration: "150ms" },
@@ -773,7 +781,7 @@ export const DEFAULT_CHAT_MESSAGES: ChatMessage[] = [
 2. 发现 ES Client 与 Redis 在模块引入阶段即建立链接，缺乏连接池怠速保护与故障转移。
 3. 发现对 Elasticsearch 'def_ims' 索引清理使用单条循环删除，吞吐低且影响集群 I/O。
 4. 设计 Lazy Load 惰性加载方案与 delete_by_query 批处理 API，补充类型标注。`,
-      isCollapsed: false,
+      isCollapsed: true,
     },
     toolExecutions: [
       { id: "t1", name: "view_file", args: "path: 'app.py'", status: "success", result: "122 行", duration: "110ms" },
@@ -877,7 +885,7 @@ export const DEFAULT_CHAT_MESSAGES: ChatMessage[] = [
       thoughtText: `1. 用户请求修改项目文件并安排发布。
 2. 评估修改动作：涉及写入数据清洗组件并在 docker 环境启动。
 3. 为了保障生产环境安全，需要向用户发起**反问互动确认**（确认部署模式与备份方式）。`,
-      isCollapsed: false,
+      isCollapsed: true,
     },
     toolExecutions: [
       { id: "t6", name: "create_file", args: "path: '/src/services/es_cleaner.py'", status: "success", result: "写入 38 行组件代码", duration: "150ms" },

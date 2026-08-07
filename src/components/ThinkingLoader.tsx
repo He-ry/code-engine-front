@@ -7,7 +7,7 @@ interface ThinkingLoaderProps {
 
 export const ThinkingLoader: React.FC<ThinkingLoaderProps> = ({ t }) => {
   return (
-    <div className="flex items-center gap-1.5 text-xs text-gray-400 dark:text-zinc-500 py-0.5 font-sans select-none relative z-20">
+    <div className="flex items-center gap-1.5 text-xs py-0.5 font-sans select-none relative z-20">
       {/* Small subtle breathing dot matching the 3.5x3.5 Chevron icon size & style */}
       <div className="w-3.5 h-3.5 flex items-center justify-center shrink-0">
         <motion.span
@@ -24,10 +24,28 @@ export const ThinkingLoader: React.FC<ThinkingLoaderProps> = ({ t }) => {
         />
       </div>
 
-      {/* Thinking text matching the exact style of the completed Thinking header */}
-      <span className="font-sans text-xs tracking-tight text-gray-400 dark:text-zinc-500">
-        {t("Thinking", "Thinking")}
-        <span className="animate-pulse ml-0.5">...</span>
+      {/* Thinking text with shimmer sweep highlight effect */}
+      <span
+        className="font-sans text-xs tracking-tight relative"
+        style={{
+          backgroundImage:
+            "linear-gradient(90deg, #9ca3af 0%, #9ca3af 40%, #ffffff 50%, #e5e7eb 60%, #9ca3af 100%)",
+          backgroundSize: "200% 100%",
+          WebkitBackgroundClip: "text",
+          backgroundClip: "text",
+          color: "transparent",
+          animation: "thinking-shimmer 2s ease-in-out infinite",
+          animationDirection: "alternate",
+        }}
+      >
+        <style>{`
+          @keyframes thinking-shimmer {
+            0% { background-position: 100% 0%; }
+            100% { background-position: 0% 0%; }
+          }
+        `}</style>
+        {t("思考中", "Thinking")}
+        <span className="animate-pulse ml-0.5" style={{ color: "#9ca3af" }}>...</span>
       </span>
     </div>
   );

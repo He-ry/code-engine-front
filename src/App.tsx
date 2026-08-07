@@ -458,6 +458,38 @@ export default function App() {
     }
   };
 
+  // Rename thread / conversation
+  const handleRenameThread = async (threadId: string, projectId: string, newName: string) => {
+    const baseUrl = backendApiUrl || "https://agent.hery.cloud";
+    const token = user?.token || "";
+    if (!token || !threadId) return;
+    try {
+      const { renameThread } = await import("./lib/agentClient");
+      await renameThread(baseUrl, token, threadId, newName);
+    } catch (err: any) {
+      console.warn("Failed to rename thread:", err);
+    }
+  };
+
+  // Delete thread / conversation
+  const handleDeleteThread = async (threadId: string, projectId: string) => {
+    const baseUrl = backendApiUrl || "https://agent.hery.cloud";
+    const token = user?.token || "";
+    if (!token || !threadId) return;
+    try {
+      const { deleteThread } = await import("./lib/agentClient");
+      await deleteThread(baseUrl, token, threadId);
+      // The sidebar will refresh its thread list via onDeleteThread callback
+    } catch (err: any) {
+      console.warn("Failed to delete thread:", err);
+      window.dispatchEvent(
+        new CustomEvent("app:show_toast", {
+          detail: { type: "error", title: t("删除失败", "Delete failed"), description: err?.message || String(err) },
+        })
+      );
+    }
+  };
+
   // Create project
   const handleCreateProject = async (name: string, gitUrl?: string) => {
     const baseUrl = backendApiUrl || "https://agent.hery.cloud";
@@ -654,7 +686,7 @@ export default function App() {
               list.push({
                 id: `tp-${now}-${Math.random().toString(36).slice(2, 6)}`,
                 thoughtText: delta,
-                isCollapsed: false,
+                isCollapsed: true,
                 createdAt: now,
               });
             } else {
@@ -691,7 +723,7 @@ export default function App() {
             const newBlock: ThinkingProcess = {
               id: `tp-${now}-${Math.random().toString(36).slice(2, 6)}`,
               thoughtText: "",
-              isCollapsed: false,
+              isCollapsed: true,
               createdAt: now,
             };
 
@@ -1081,7 +1113,7 @@ export default function App() {
       // 1. Ensure a thread exists (reuse across turns).
       let threadId = threadIdRef.current;
       if (!threadId) {
-        const created = await createThread(baseUrl, token, modelId, activeProject.name || "New Chat", activeProjectId);
+        const created = await createThread(baseUrl, token, modelId, activeProject.name || "New Chat", activeProjectId, approvalPolicy);
         threadId = created.threadId;
         threadIdRef.current = threadId;
       }
@@ -1251,6 +1283,8 @@ export default function App() {
           onNewTask={handleNewTask}
           onCreateProject={handleCreateProject}
           onSelectThread={handleSelectThread}
+          onDeleteThread={handleDeleteThread}
+          onRenameThread={handleRenameThread}
           pinned={sidebarPinned}
           isOpen={isSidebarOpen}
           onTogglePin={() => setSidebarPinned(!sidebarPinned)}
