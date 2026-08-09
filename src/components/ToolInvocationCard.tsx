@@ -21,6 +21,8 @@ import {
   XCircle,
   Loader2,
   Check,
+  Copy,
+  CheckCheck,
 } from "lucide-react";
 import { ToolExecution } from "../types";
 import { useSettings } from "../context/SettingsContext";
@@ -41,6 +43,31 @@ export const ToolInvocationCard: React.FC<ToolInvocationCardProps> = ({
   const [autoExecute, setAutoExecute] = useState(tool.autoExecute || false);
   const [status, setStatus] = useState<ToolExecution["status"]>(tool.status);
   const [resultText, setResultText] = useState<string | null>(tool.result || null);
+  const [copiedSection, setCopiedSection] = useState<string | null>(null);
+
+  const handleCopy = async (text: string, section: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedSection(section);
+      setTimeout(() => setCopiedSection(null), 2000);
+    } catch {
+      // Fallback for older browsers or non-HTTPS contexts
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      try {
+        document.execCommand("copy");
+        setCopiedSection(section);
+        setTimeout(() => setCopiedSection(null), 2000);
+      } catch {
+        // silently fail
+      }
+      document.body.removeChild(textarea);
+    }
+  };
 
   // Sync internal state when parent props change (e.g. SSE item_completed events).
   useEffect(() => {
@@ -135,12 +162,12 @@ export const ToolInvocationCard: React.FC<ToolInvocationCardProps> = ({
 
   const { icon: ToolIcon, color: iconColor, bg: iconBg } = getToolIcon();
 
-  const displayCommand = tool.command || tool.description || tool.args || "";
+  const displayCommand = tool.command || tool.description || tool.args || tool.contentDelta || "";
 
   return (
-    <div className="w-full my-1.5 font-sans text-xs select-none">
+    <div className="w-full my-1.5 font-sans text-xs">
       {/* Sleek Compact Card Bar (Single Inline Row) */}
-      <div className="w-full px-2.5 py-2 rounded-xl border border-gray-200/90 dark:border-zinc-800 bg-white dark:bg-zinc-900/80 shadow-2xs flex items-center justify-between gap-2.5 transition-all">
+      <div className="w-full px-2.5 py-2 rounded-xl border border-gray-200/90 dark:border-zinc-800 bg-white dark:bg-zinc-900/80 shadow-2xs flex items-center justify-between gap-2.5 transition-all select-none">
         {/* Left: Chevron Arrow (FIRST) + Icon + Action Title + Command */}
         <div className="flex items-center gap-2 min-w-0 flex-1">
           {/* 1. Expand/Collapse Chevron at the VERY FRONT */}
@@ -285,14 +312,63 @@ export const ToolInvocationCard: React.FC<ToolInvocationCardProps> = ({
 
           <div className="flex items-center justify-between text-gray-500 dark:text-zinc-400 font-sans text-[11px]">
             <span>{t("完整指令 / 参数：", "Full Command / Arguments:")}</span>
+            <button
+              onClick={() => handleCopy(displayCommand, "command")}
+              className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] hover:bg-gray-200 dark:hover:bg-zinc-700 transition-colors cursor-pointer"
+              title={t("复制", "Copy")}
+            >
+              {copiedSection === "command" ? (
+                <CheckCheck className="w-3 h-3 text-emerald-500" />
+              ) : (
+                <Copy className="w-3 h-3" />
+              )}
+              <span>{copiedSection === "command" ? t("已复制", "Copied") : t("复制", "Copy")}</span>
+            </button>
           </div>
           <div className="p-2 rounded-lg bg-zinc-950 text-zinc-100 overflow-x-auto whitespace-pre-wrap break-all border border-zinc-800">
             {displayCommand}
           </div>
 
+          {tool.contentDelta && (
+            <div className="space-y-1 pt-1">
+              <div className="flex items-center justify-between text-gray-500 dark:text-zinc-400 font-sans text-[11px]">
+                <span>{t("生成内容：", "Generated Content:")}</span>
+                <button
+                  onClick={() => handleCopy(tool.contentDelta || "", "content")}
+                  className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] hover:bg-gray-200 dark:hover:bg-zinc-700 transition-colors cursor-pointer"
+                  title={t("复制", "Copy")}
+                >
+                  {copiedSection === "content" ? (
+                    <CheckCheck className="w-3 h-3 text-emerald-500" />
+                  ) : (
+                    <Copy className="w-3 h-3" />
+                  )}
+                  <span>{copiedSection === "content" ? t("已复制", "Copied") : t("复制", "Copy")}</span>
+                </button>
+              </div>
+              <div className="p-2 rounded-lg overflow-x-auto whitespace-pre-wrap max-h-64 bg-zinc-950 text-emerald-100 border border-zinc-800">
+                {tool.contentDelta}
+              </div>
+            </div>
+          )}
+
           {resultText && (
             <div className="space-y-1 pt-1">
-              <div className="text-gray-500 dark:text-zinc-400 font-sans text-[11px]">{t("执行结果：", "Execution Result:")}</div>
+              <div className="flex items-center justify-between text-gray-500 dark:text-zinc-400 font-sans text-[11px]">
+                <span>{t("执行结果：", "Execution Result:")}</span>
+                <button
+                  onClick={() => handleCopy(resultText, "result")}
+                  className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] hover:bg-gray-200 dark:hover:bg-zinc-700 transition-colors cursor-pointer"
+                  title={t("复制", "Copy")}
+                >
+                  {copiedSection === "result" ? (
+                    <CheckCheck className="w-3 h-3 text-emerald-500" />
+                  ) : (
+                    <Copy className="w-3 h-3" />
+                  )}
+                  <span>{copiedSection === "result" ? t("已复制", "Copied") : t("复制", "Copy")}</span>
+                </button>
+              </div>
               <div className={`p-2 rounded-lg overflow-x-auto whitespace-pre-wrap max-h-36 border ${
                 status === "error" && !isCancelled
                   ? "bg-red-950/30 border-red-800/60 text-red-300"

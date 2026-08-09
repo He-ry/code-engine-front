@@ -123,6 +123,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   });
   const [projectThreads, setProjectThreads] = useState<Record<string, any[]>>({});
   const [deletingThreadId, setDeletingThreadId] = useState<string | null>(null);
+  const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
   const [menuThreadId, setMenuThreadId] = useState<string | null>(null);
   const [editingThreadId, setEditingThreadId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
@@ -550,9 +551,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                             </button>
                                             <button
                                               className="w-full px-3 py-1.5 text-left text-gray-700 dark:text-zinc-300 hover:bg-gray-300/40 dark:hover:bg-zinc-800/80 rounded transition-colors cursor-pointer flex items-center gap-2 text-[12px]"
-                                              onClick={() => {
+                                              onClick={(e) => {
+                                                e.stopPropagation();
                                                 setMenuThreadId(null);
                                                 setDeletingThreadId(thread.id);
+                                                setDeletingProjectId(proj.id);
                                               }}
                                             >
                                               <Trash2 className="w-3 h-3 text-gray-400" />
@@ -564,44 +567,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                     </div>
                                   </div>
 
-                                  {/* Delete confirm popover */}
-                                  {isDeleting && (
-                                    <>
-                                      <div className="fixed inset-0 z-40" onClick={() => setDeletingThreadId(null)} />
-                                      <div className="absolute right-0 top-full mt-1 z-50 rounded-md border border-gray-200 dark:border-zinc-800 bg-white dark:bg-[#1a1a1e] shadow-xl shadow-black/5 dark:shadow-black/30 p-4 text-xs font-sans w-56">
-                                        <p className="text-gray-700 dark:text-zinc-300 mb-3 leading-relaxed text-[13px]">
-                                          {t("删除后无法恢复，确定删除吗？", "This action cannot be undone. Are you sure?")}
-                                        </p>
-                                        <div className="flex justify-end gap-2">
-                                          <button
-                                            onClick={() => setDeletingThreadId(null)}
-                                            className="px-3 py-1.5 rounded-md text-gray-500 dark:text-zinc-400 hover:bg-gray-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer text-[12px] font-medium"
-                                          >
-                                            {t("取消", "Cancel")}
-                                          </button>
-                                          <button
-                                            onClick={async () => {
-                                              await onDeleteThread?.(thread.id, proj.id);
-                                              setDeletingThreadId(null);
-                                              setProjectThreads((prev) => {
-                                                const existing = prev[proj.id];
-                                                if (!existing) return prev;
-                                                return { ...prev, [proj.id]: existing.filter((t: any) => t.id !== thread.id) };
-                                              });
-                                              window.dispatchEvent(
-                                                new CustomEvent("app:show_toast", {
-                                                  detail: { type: "success", title: t("删除成功", "Deleted successfully") },
-                                                })
-                                              );
-                                            }}
-                                            className="px-3 py-1.5 rounded-md bg-gray-800 dark:bg-zinc-100 hover:bg-gray-900 dark:hover:bg-white text-white dark:text-gray-900 transition-colors cursor-pointer text-[12px] font-medium"
-                                          >
-                                            {t("删除", "Delete")}
-                                          </button>
-                                        </div>
-                                      </div>
-                                    </>
-                                  )}
                                 </div>
                                 );
                               });
@@ -685,6 +650,60 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     className="px-3.5 py-1.5 rounded-md bg-gray-900 dark:bg-zinc-100 text-white dark:text-zinc-900 font-medium text-xs hover:bg-gray-800 dark:hover:bg-zinc-200 transition-all cursor-pointer"
                   >
                     <span>{t("退出登录", "Sign Out")}</span>
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+          {deletingThreadId && (
+            <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-md shadow-2xl max-w-sm w-full overflow-hidden"
+              >
+                <div className="p-5 space-y-3">
+                  <div className="flex items-center gap-2.5 text-gray-900 dark:text-zinc-100 font-bold text-sm">
+                    <Trash2 className="w-4 h-4 shrink-0 text-gray-500 dark:text-zinc-400" />
+                    <span>{t("确认删除", "Confirm Delete")}</span>
+                  </div>
+                  <p className="text-xs text-gray-600 dark:text-zinc-300 leading-relaxed">
+                    {t("删除后无法恢复，确定删除吗？", "This action cannot be undone. Are you sure?")}
+                  </p>
+                </div>
+                <div className="px-5 py-3 bg-gray-50 dark:bg-zinc-900/50 border-t border-gray-200 dark:border-zinc-800 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => { setDeletingThreadId(null); setDeletingProjectId(null); }}
+                    className="px-3.5 py-1.5 rounded-md border border-gray-200 dark:border-zinc-800 text-xs font-medium text-gray-700 dark:text-zinc-300 hover:bg-gray-100 dark:hover:bg-zinc-800 cursor-pointer transition-colors"
+                  >
+                    {t("取消", "Cancel")}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const threadId = deletingThreadId;
+                      const projectId = deletingProjectId;
+                      setDeletingThreadId(null);
+                      setDeletingProjectId(null);
+                      if (threadId && projectId) {
+                        await onDeleteThread?.(threadId, projectId);
+                        setProjectThreads((prev) => {
+                          const existing = prev[projectId];
+                          if (!existing) return prev;
+                          return { ...prev, [projectId]: existing.filter((t: any) => t.id !== threadId) };
+                        });
+                        window.dispatchEvent(
+                          new CustomEvent("app:show_toast", {
+                            detail: { type: "success", title: t("删除成功", "Deleted successfully") },
+                          })
+                        );
+                      }
+                    }}
+                    className="px-3.5 py-1.5 rounded-md bg-gray-900 dark:bg-zinc-100 text-white dark:text-zinc-900 font-medium text-xs hover:bg-gray-800 dark:hover:bg-zinc-200 transition-all cursor-pointer"
+                  >
+                    <span>{t("删除", "Delete")}</span>
                   </button>
                 </div>
               </motion.div>

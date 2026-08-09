@@ -479,7 +479,11 @@ export default function App() {
     try {
       const { deleteThread } = await import("./lib/agentClient");
       await deleteThread(baseUrl, token, threadId);
-      // The sidebar will refresh its thread list via onDeleteThread callback
+      // If the deleted thread is the currently active one, reset to new conversation
+      if (threadIdRef.current === threadId) {
+        setMessages([]);
+        threadIdRef.current = null;
+      }
     } catch (err: any) {
       console.warn("Failed to delete thread:", err);
       window.dispatchEvent(
@@ -736,24 +740,34 @@ export default function App() {
       case "command_execution_output_delta": {
         // Stream argument deltas (e.g. file content) to the matching
         // tool card so the user sees real-time writing progress.
+        // Creates a placeholder tool card when the delta arrives
+        // BEFORE the matching item_started event.
         const deltaItemId = data.itemId || data.item_id || "";
         const deltaText = data.delta || "";
         if (!deltaItemId || !deltaText) break;
         setMessages((prev) =>
           prev.map((m) => {
             if (m.id !== aiMsgId) return m;
-            return {
-              ...m,
-              toolExecutions: (m.toolExecutions || []).map((te) =>
-                te.id === deltaItemId
-                  ? {
-                      ...te,
-                      contentDelta: (te.contentDelta || "") + deltaText,
-                      status: "running" as const,
-                    }
-                  : te
-              ),
-            };
+            const tools = [...(m.toolExecutions || [])];
+            const existingIdx = tools.findIndex((te) => te.id === deltaItemId);
+            if (existingIdx >= 0) {
+              tools[existingIdx] = {
+                ...tools[existingIdx],
+                contentDelta: (tools[existingIdx].contentDelta || "") + deltaText,
+                status: "running" as const,
+              };
+            } else {
+              // Tool card not yet created by item_started — insert placeholder
+              tools.push({
+                id: deltaItemId,
+                name: "",
+                command: "",
+                status: "running",
+                contentDelta: deltaText,
+                createdAt: now,
+              });
+            }
+            return { ...m, toolExecutions: tools };
           })
         );
         break;
@@ -780,18 +794,35 @@ export default function App() {
         // ---- tool call announced ----
         if (item.type === "command_execution") {
           const args = item.arguments || {};
-          const exec: ToolExecution = {
-            id: item.id || item.callId || `te-${now}-${Math.random().toString(36).slice(2, 7)}`,
-            name: item.toolName || item.tool || "tool",
-            command: item.command || "",
-            args: typeof args === "string" ? args : JSON.stringify(args),
-            description: item.command || "",
-            status: "running",
-            createdAt: now,
-          };
+          const execId = item.id || item.callId || `te-${now}-${Math.random().toString(36).slice(2, 7)}`;
+          const execName = item.toolName || item.tool || "tool";
+          const execCmd = item.command || "";
+          const execArgs = typeof args === "string" ? args : JSON.stringify(args);
           setMessages((prev) =>
             prev.map((m) => {
               if (m.id !== aiMsgId) return m;
+              const tools = [...(m.toolExecutions || [])];
+              const existingIdx = tools.findIndex((te) => te.id === execId);
+              if (existingIdx >= 0) {
+                // Update placeholder created by an earlier command_execution_output_delta
+                tools[existingIdx] = {
+                  ...tools[existingIdx],
+                  name: execName || tools[existingIdx].name,
+                  command: execCmd || tools[existingIdx].command,
+                  args: execArgs || tools[existingIdx].args,
+                  description: execCmd || tools[existingIdx].description,
+                };
+              } else {
+                tools.push({
+                  id: execId,
+                  name: execName,
+                  command: execCmd,
+                  args: execArgs,
+                  description: execCmd,
+                  status: "running",
+                  createdAt: now,
+                });
+              }
               const segments = m.textSegments ? [...m.textSegments] : [];
               const last = segments[segments.length - 1];
               if (!last || last.text.length > 0) {
@@ -800,7 +831,7 @@ export default function App() {
               return {
                 ...m,
                 agentStatus: "executing_tool",
-                toolExecutions: [...(m.toolExecutions || []), exec],
+                toolExecutions: tools,
                 textSegments: segments,
               };
             })
@@ -875,26 +906,6 @@ export default function App() {
             )
           );
         }
-        break;
-      }
-      case "command_execution_output_delta": {
-        const delta = data.delta || "";
-        const itemId = data.itemId || data.item_id || "";
-        if (!delta || !itemId) break;
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === aiMsgId
-              ? {
-                  ...m,
-                  toolExecutions: (m.toolExecutions || []).map((te) =>
-                    te.id === itemId
-                      ? { ...te, result: (te.result || "") + delta }
-                      : te
-                  ),
-                }
-              : m
-          )
-        );
         break;
       }
       case "turn_complete": {
