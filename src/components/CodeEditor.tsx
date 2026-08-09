@@ -88,6 +88,8 @@ interface CodeEditorProps {
   onCloseTab: (path: string) => void;
   onContentChange: (path: string, newContent: string) => void;
   onCloseEditor: () => void;
+  onKeepFile?: (path: string) => void;
+  onRevertFile?: (path: string, originalContent: string | null) => void;
 }
 
 interface OutlineSymbol {
@@ -103,6 +105,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   onCloseTab,
   onContentChange,
   onCloseEditor,
+  onKeepFile,
+  onRevertFile,
 }) => {
   const { t } = useSettings();
   const { showSuccess, showInfo } = useToast();
@@ -471,6 +475,28 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
             )}
           </button>
         </div>
+
+        {/* Pending change keep/revert buttons (from write_file) */}
+        {activeTab?.pendingChange && !activeTab.pendingChange.isConfirmed && (
+          <div className="flex items-center gap-1.5 shrink-0 mr-2">
+            <button
+              onClick={() => onKeepFile?.(activeTab.path)}
+              className="px-2 py-0.5 text-[10px] font-semibold text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/40 hover:bg-emerald-100 dark:hover:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800/60 rounded transition-colors cursor-pointer flex items-center gap-1"
+              title={t("保留更改", "Keep changes")}
+            >
+              <Check className="w-3 h-3" />
+              <span>{t("保留", "Keep")}</span>
+            </button>
+            <button
+              onClick={() => onRevertFile?.(activeTab.path, activeTab.pendingChange!.originalContent)}
+              className="px-2 py-0.5 text-[10px] font-semibold text-gray-600 dark:text-zinc-300 bg-gray-100 dark:bg-zinc-800 hover:bg-gray-200 dark:hover:bg-zinc-700 border border-gray-200 dark:border-zinc-700 rounded transition-colors cursor-pointer flex items-center gap-1"
+              title={t("撤销更改", "Revert changes")}
+            >
+              <RotateCw className="w-3 h-3" />
+              <span>{t("撤销", "Revert")}</span>
+            </button>
+          </div>
+        )}
 
         {/* Right Action Control Buttons & Cursor Stats */}
         <div className="flex items-center gap-1.5 text-gray-500 dark:text-zinc-400 shrink-0 relative">

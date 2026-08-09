@@ -26,7 +26,7 @@ import {
   interruptTurn,
   loadHistory,
 } from "./lib/agentClient";
-import { listProjects, createProject } from "./lib/projectApi";
+import { listProjects, createProject, writeFile, deleteFile } from "./lib/projectApi";
 import { DEFAULT_CHAT_MESSAGES, EN_DEFAULT_CHAT_MESSAGES } from "./data/mockData";
 import { Project, ChatMessage, ContextPill, FileNode, OpenTab, ToolExecution, ThinkingProcess } from "./types";
 import { Folder, ChevronDown, Sparkles, Check, Globe, Languages, ShieldAlert, ShieldCheck, ShieldX } from "lucide-react";
@@ -528,6 +528,37 @@ export default function App() {
     }
   };
 
+  // Delete project
+  const handleDeleteProject = async (projectId: string) => {
+    const baseUrl = backendApiUrl || "https://agent.hery.cloud";
+    const token = user?.token || "";
+    if (!token || !projectId) return;
+    try {
+      const { deleteProject } = await import("./lib/projectApi");
+      await deleteProject(baseUrl, token, projectId);
+      setProjects((prev) => prev.filter((p) => p.id !== projectId));
+      // If the deleted project was active, reset
+      if (activeProjectIdRef.current === projectId) {
+        setMessages([]);
+        threadIdRef.current = null;
+        activeProjectIdRef.current = "";
+        setActiveProjectId("");
+        navigate("/");
+      }
+      window.dispatchEvent(
+        new CustomEvent("app:show_toast", {
+          detail: { type: "success", title: t("项目已删除", "Project deleted") },
+        })
+      );
+    } catch (err: any) {
+      window.dispatchEvent(
+        new CustomEvent("app:show_toast", {
+          detail: { type: "error", title: t("删除失败", "Delete failed"), description: err?.message || String(err) },
+        })
+      );
+    }
+  };
+
   // Create project
   const handleCreateProject = async (name: string, gitUrl?: string) => {
     const baseUrl = backendApiUrl || "https://agent.hery.cloud";
@@ -580,6 +611,83 @@ export default function App() {
       };
       setOpenTabs([...openTabs, newTab]);
       setActiveTabPath(file.path);
+    }
+  };
+
+  // Open file from FileChangeCard (path + content string)
+  const handleOpenFileFromCard = (path: string, content: string) => {
+    const name = path.split("/").pop() || path;
+    const existing = openTabs.find((t) => t.path === path);
+    if (existing) {
+      setActiveTabPath(path);
+    } else {
+      const newTab: OpenTab = {
+        path,
+        name,
+        content: content || "",
+      };
+      setOpenTabs([...openTabs, newTab]);
+      setActiveTabPath(path);
+    }
+  };
+
+  // Keep a file change (accept the edit — file is already on disk, just dismiss pending state)
+  const handleKeepFile = (filePath: string) => {
+    setOpenTabs((prev) =>
+      prev.map((t) =>
+        t.path === filePath && t.pendingChange
+          ? { ...t, pendingChange: { ...t.pendingChange, isConfirmed: true } }
+          : t
+      )
+    );
+  };
+
+  // Revert a file change (restore original or delete new file)
+  const handleRevertFile = async (filePath: string, originalContent: string | null) => {
+    const baseUrl = backendApiUrl || "https://agent.hery.cloud";
+    const token = user?.token || "";
+    if (!token || !activeProjectId) return;
+
+    try {
+      if (originalContent === null) {
+        // New file — delete it
+        await deleteFile(baseUrl, token, activeProjectId, filePath);
+      } else {
+        // Modified file — restore original content
+        await writeFile(baseUrl, token, activeProjectId, filePath, originalContent);
+      }
+      // Update open tabs: restore original content in the editor tab if open
+      setOpenTabs((prev) =>
+        prev.map((t) =>
+          t.path === filePath
+            ? {
+                ...t,
+                content: originalContent || "",
+                isModified: false,
+                pendingChange: undefined,
+              }
+            : t
+        )
+      );
+      window.dispatchEvent(
+        new CustomEvent("app:show_toast", {
+          detail: {
+            type: "success",
+            title: t("已撤销更改", "Change reverted"),
+            description: filePath,
+          },
+        })
+      );
+    } catch (err: any) {
+      window.dispatchEvent(
+        new CustomEvent("app:show_toast", {
+          detail: {
+            type: "error",
+            title: t("撤销失败", "Revert failed"),
+            description: err?.message || String(err),
+          },
+        })
+      );
     }
   };
 
@@ -902,6 +1010,26 @@ export default function App() {
                             ...(args ? { args: typeof args === "string" ? args : JSON.stringify(args) } : {}),
                             ...(item.command ? { command: item.command, description: item.command } : {}),
                           }
+                        : te
+                    ),
+                  }
+                : m
+            )
+          );
+        }
+        // file_change item — write_file / apply_patch completed with structured file list
+        if (item.type === "file_change") {
+          const itemId = item.id || item.callId || "";
+          const files = item.files || [];
+          const stats = item.fileStats || { added: 0, removed: 0 };
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === aiMsgId
+                ? {
+                    ...m,
+                    toolExecutions: (m.toolExecutions || []).map((te) =>
+                      te.id === itemId
+                        ? { ...te, files, fileStats: stats, status: "success" as const }
                         : te
                     ),
                   }
@@ -1363,6 +1491,7 @@ export default function App() {
           onSelectThread={handleSelectThread}
           onDeleteThread={handleDeleteThread}
           onRenameThread={handleRenameThread}
+          onDeleteProject={handleDeleteProject}
           pinned={sidebarPinned}
           isOpen={isSidebarOpen}
           onTogglePin={() => setSidebarPinned(!sidebarPinned)}
@@ -1510,6 +1639,9 @@ export default function App() {
                         onSelectOption={handleAskUserSubmit}
                         pendingApprovals={pendingApprovals}
                         onApproval={handleApproval}
+                        onOpenFile={handleOpenFileFromCard}
+                        onKeepFile={handleKeepFile}
+                        onRevertFile={handleRevertFile}
                       />
                       <div className="p-3 bg-[#ffffff]/90 dark:bg-zinc-950/90 backdrop-blur-xs">
                         <PromptInput
@@ -1590,6 +1722,8 @@ export default function App() {
                     onCloseTab={handleCloseTab}
                     onContentChange={handleContentChange}
                     onCloseEditor={() => setOpenTabs([])}
+                    onKeepFile={handleKeepFile}
+                    onRevertFile={handleRevertFile}
                   />
                 </motion.div>
               )}

@@ -59,6 +59,11 @@ export interface OpenTab {
   content: string;
   isModified?: boolean;
   language?: string;
+  pendingChange?: {
+    toolCallId: string;
+    originalContent: string | null; // null = new file
+    isConfirmed: boolean;
+  };
 }
 
 export interface FileNode {
@@ -93,6 +98,22 @@ export interface FileReadResponse {
   modified_at?: string | null;
 }
 
+export interface FileChange {
+  path: string;
+  kind: "add" | "update" | "delete";
+  diff: string;
+  added: number;
+  removed: number;
+  content?: string;
+  original_content?: string | null; // null = new file
+  error?: string;
+}
+
+export interface FileChangeStats {
+  added: number;
+  removed: number;
+}
+
 export interface ToolExecution {
   id: string;
   name: string;
@@ -108,6 +129,10 @@ export interface ToolExecution {
   wasAborted?: boolean;
   /** Accumulated argument delta (e.g. file content being written). */
   contentDelta?: string;
+  /** File change list (write_file / apply_patch tools). */
+  files?: FileChange[];
+  /** Aggregated diff stats. */
+  fileStats?: FileChangeStats;
 }
 
 export interface TextSegment {

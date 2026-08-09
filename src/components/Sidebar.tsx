@@ -88,6 +88,7 @@ interface SidebarProps {
   onSelectThread?: (threadId: string) => void;
   onDeleteThread?: (threadId: string, projectId: string) => void;
   onRenameThread?: (threadId: string, projectId: string, newName: string) => void;
+  onDeleteProject?: (projectId: string) => void;
   pinned: boolean;
   isOpen: boolean;
   onTogglePin?: () => void;
@@ -108,6 +109,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSelectThread,
   onDeleteThread,
   onRenameThread,
+  onDeleteProject,
   pinned,
   isOpen,
   onTogglePin,
@@ -134,6 +136,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
   const [menuThreadId, setMenuThreadId] = useState<string | null>(null);
   const [menuPosition, setMenuPosition] = useState<{x: number; y: number} | null>(null);
+  const [menuProjectId, setMenuProjectId] = useState<string | null>(null);
+  const [menuProjectPos, setMenuProjectPos] = useState<{x: number; y: number} | null>(null);
+  const [confirmDeleteProjectId, setConfirmDeleteProjectId] = useState<string | null>(null);
   const [editingThreadId, setEditingThreadId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const editInputRef = useRef<HTMLInputElement>(null);
@@ -442,6 +447,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
                             <button
                               className="p-1 hover:bg-gray-300/60 dark:hover:bg-zinc-700 rounded text-gray-600 dark:text-zinc-300 transition-colors"
                               title={t("更多选项", "More Options")}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (menuProjectId === proj.id) {
+                                  setMenuProjectId(null);
+                                  setMenuProjectPos(null);
+                                } else {
+                                  const rect = e.currentTarget.getBoundingClientRect();
+                                  setMenuProjectId(proj.id);
+                                  setMenuProjectPos({ x: rect.right, y: rect.bottom });
+                                }
+                              }}
                             >
                               <MoreHorizontal className="w-3.5 h-3.5" />
                             </button>
@@ -777,6 +793,89 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </>
           );
         })()}
+        {/* Project action dropdown — rendered outside scroll container */}
+        {menuProjectId && menuProjectPos && (() => {
+          const found = projects.find((p) => p.id === menuProjectId);
+          if (!found) return null;
+          return (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => { setMenuProjectId(null); setMenuProjectPos(null); }} />
+              <div
+                className="fixed z-50 rounded-md border border-gray-200 dark:border-zinc-800 bg-white dark:bg-[#1a1a1e] shadow-xl shadow-black/5 dark:shadow-black/30 p-1 text-xs font-sans w-32"
+                style={{ top: menuProjectPos.y + 4, left: menuProjectPos.x - 128 }}
+              >
+                <button
+                  className="w-full px-3 py-1.5 text-left text-gray-700 dark:text-zinc-300 hover:bg-gray-300/40 dark:hover:bg-zinc-800/80 rounded transition-colors cursor-pointer flex items-center gap-2 text-[12px]"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setMenuProjectId(null);
+                    setMenuProjectPos(null);
+                  }}
+                >
+                  <Settings className="w-3 h-3 text-gray-400" />
+                  {t("设置", "Settings")}
+                </button>
+                <button
+                  className="w-full px-3 py-1.5 text-left text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded transition-colors cursor-pointer flex items-center gap-2 text-[12px]"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setMenuProjectId(null);
+                    setMenuProjectPos(null);
+                    setConfirmDeleteProjectId(menuProjectId);
+                  }}
+                >
+                  <Trash2 className="w-3 h-3 text-rose-500" />
+                  {t("删除项目", "Delete Project")}
+                </button>
+              </div>
+            </>
+          );
+        })()}
+        {/* Project delete confirmation modal */}
+        <AnimatePresence>
+          {confirmDeleteProjectId && (
+            <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-md shadow-2xl max-w-sm w-full overflow-hidden"
+              >
+                <div className="p-5 space-y-3">
+                  <div className="flex items-center gap-2.5 text-gray-900 dark:text-zinc-100 font-bold text-sm">
+                    <Trash2 className="w-4 h-4 shrink-0 text-rose-500" />
+                    <span>{t("确认删除项目", "Confirm Delete Project")}</span>
+                  </div>
+                  <p className="text-xs text-gray-600 dark:text-zinc-300 leading-relaxed">
+                    {t("此操作不可恢复。项目下的所有对话线程、工作区文件和设置都将被永久删除。确定要继续吗？", "This action cannot be undone. All conversation threads, workspace files, and settings under this project will be permanently deleted. Are you sure?")}
+                  </p>
+                </div>
+                <div className="px-5 py-3 bg-gray-50 dark:bg-zinc-900/50 border-t border-gray-200 dark:border-zinc-800 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDeleteProjectId(null)}
+                    className="px-3.5 py-1.5 rounded-md border border-gray-200 dark:border-zinc-800 text-xs font-medium text-gray-700 dark:text-zinc-300 hover:bg-gray-100 dark:hover:bg-zinc-800 cursor-pointer transition-colors"
+                  >
+                    {t("取消", "Cancel")}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const pid = confirmDeleteProjectId;
+                      setConfirmDeleteProjectId(null);
+                      if (pid) {
+                        await onDeleteProject?.(pid);
+                      }
+                    }}
+                    className="px-3.5 py-1.5 rounded-md bg-rose-600 hover:bg-rose-700 text-white font-medium text-xs transition-all cursor-pointer"
+                  >
+                    <span>{t("删除", "Delete")}</span>
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
     </>
       );
     };

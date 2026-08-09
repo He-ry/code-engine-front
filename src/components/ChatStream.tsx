@@ -5,6 +5,7 @@ import { useSettings } from "../context/SettingsContext";
 import { ChatMessage, ToolExecution, ThinkingProcess, TextSegment } from "../types";
 import { CodeBlock } from "./CodeBlock";
 import { ToolInvocationCard } from "./ToolInvocationCard";
+import { FileChangeCard } from "./FileChangeCard";
 import { ThinkingLoader } from "./ThinkingLoader";
 import {
   Copy,
@@ -40,6 +41,9 @@ interface ChatStreamProps {
     arguments: any;
   }>;
   onApproval?: (approved: boolean, approvalId?: string) => void;
+  onOpenFile?: (path: string, content: string) => void;
+  onKeepFile?: (path: string) => void;
+  onRevertFile?: (path: string, originalContent: string | null) => void;
 }
 
 export const ChatStream: React.FC<ChatStreamProps> = ({
@@ -48,6 +52,9 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
   onSelectOption,
   pendingApprovals,
   onApproval,
+  onOpenFile,
+  onKeepFile,
+  onRevertFile,
 }) => {
   const { t } = useSettings();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -394,6 +401,25 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
                 );
               }
               if (item.type === "tool") {
+                const isFileTool =
+                  item.tool.name === "write_file" || item.tool.name === "apply_patch";
+                // Always use FileChangeCard for file-editing tools — it handles
+                // all states internally (pending / running / completed / error).
+                if (isFileTool) {
+                  return (
+                    <div key={item.key} className="w-full">
+                      <FileChangeCard
+                        tool={item.tool}
+                        isStreaming={msg.isStreaming || false}
+                        onApprove={(toolId) => onApproval?.(true, toolId)}
+                        onReject={(toolId) => onApproval?.(false, toolId)}
+                        onOpenFile={onOpenFile}
+                        onKeepFile={onKeepFile}
+                        onRevertFile={onRevertFile}
+                      />
+                    </div>
+                  );
+                }
                 return (
                   <div key={item.key} className="w-full">
                     <ToolInvocationCard
