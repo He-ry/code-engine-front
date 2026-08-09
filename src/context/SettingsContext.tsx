@@ -4,7 +4,7 @@ import { apiFetch } from "../lib/api";
 export type Language = "zh-CN" | "en-US";
 export type Theme = "light" | "dark" | "system";
 export type AgentThinking = "high" | "medium" | "fast";
-export type ApprovalPolicy = "never" | "on_request" | "unless_trusted" | "always";
+export type ApprovalPolicy = "auto" | "strict";
 
 export interface CustomProvider {
   id: string;
@@ -240,17 +240,12 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   });
 
   const [approvalPolicy, setApprovalPolicyState] = useState<ApprovalPolicy>(() => {
-    // Migrate legacy boolean toggle if present
     const saved = localStorage.getItem("app_approval_policy");
-    if (saved && ["never", "on_request", "unless_trusted", "always"].includes(saved)) {
-      return saved as ApprovalPolicy;
-    }
-    const legacy = localStorage.getItem("app_auto_approve_cmd");
-    if (legacy !== null) {
-      // Old boolean: true → "never" (don't ask), false → "unless_trusted" (default)
-      return JSON.parse(legacy) ? "never" : "unless_trusted";
-    }
-    return "unless_trusted";
+    // Migrate legacy values to the new 2-mode system
+    if (saved === "always") return "strict";
+    if (saved === "auto" || saved === "strict") return saved;
+    // "never" / "on_request" / "unless_trusted" → auto (default)
+    return "auto";
   });
 
   const [defaultModel, setDefaultModelState] = useState<string>(() => {

@@ -302,6 +302,7 @@ export default function App() {
   // Active chat state
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
+  const [resolvedThreadIds, setResolvedThreadIds] = useState<Set<string>>(new Set());
   // Default to the user's configured default model so the first send
   // doesn't fall through to an arbitrary enabled model.
   const [selectedModel, setSelectedModel] = useState<string>(() =>
@@ -600,6 +601,7 @@ export default function App() {
         (e) => console.warn("Interrupt failed:", e)
       );
     }
+    setResolvedThreadIds((prev) => new Set([...prev, threadId]));
     setIsGenerating(false);
   };
 
@@ -1082,6 +1084,16 @@ export default function App() {
     };
     setMessages((prev) => [...prev, userMsg]);
     setIsGenerating(true);
+    // Remove any prior resolved indicator while a new generation is active.
+    setResolvedThreadIds((prev) => {
+      const tid = threadIdRef.current;
+      if (tid && prev.has(tid)) {
+        const next = new Set(prev);
+        next.delete(tid);
+        return next;
+      }
+      return prev;
+    });
 
     const baseUrl = backendApiUrl || "https://agent.hery.cloud";
     const token = user?.token || "";
@@ -1124,7 +1136,8 @@ export default function App() {
       // 1. Ensure a thread exists (reuse across turns).
       let threadId = threadIdRef.current;
       if (!threadId) {
-        const created = await createThread(baseUrl, token, modelId, activeProject.name || "New Chat", activeProjectId, approvalPolicy);
+        const threadName = text.length > 30 ? text.slice(0, 30) + "..." : text;
+        const created = await createThread(baseUrl, token, modelId, threadName, activeProjectId, approvalPolicy);
         threadId = created.threadId;
         threadIdRef.current = threadId;
       }
@@ -1139,6 +1152,7 @@ export default function App() {
       }, controller.signal);
 
       // Mark the message complete when the stream ends normally.
+      setResolvedThreadIds((prev) => new Set([...prev, threadId]));
       setMessages((prev) =>
         prev.map((m) =>
           m.id === aiMsgId
@@ -1148,6 +1162,7 @@ export default function App() {
       );
     } catch (err: any) {
       const msg = err?.message || "Agent request failed";
+      setResolvedThreadIds((prev) => new Set([...prev, threadId]));
       setMessages((prev) =>
         prev.map((m) =>
           m.id === aiMsgId
@@ -1302,6 +1317,9 @@ export default function App() {
           onMouseEnter={handleMouseEnterSidebar}
           onMouseLeave={handleMouseLeaveSidebar}
           onOpenSettings={handleOpenSettings}
+          activeThreadId={threadIdRef.current}
+          isGenerating={isGenerating}
+          resolvedThreadIds={resolvedThreadIds}
         />
 
         {/* Right Main Area (Workspace + Terminal) */}

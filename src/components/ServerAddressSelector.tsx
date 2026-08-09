@@ -9,7 +9,7 @@ interface ServerAddressSelectorProps {
 
 const PRESET_URLS = [
   { url: "https://agent.hery.cloud", label: "agent.hery.cloud (云端)" },
-  { url: "http://27.0.0.1:5174", label: "27.0.0.1:5174 (本地)" },
+  { url: "http://127.0.0.1:5174", label: "127.0.0.1:5174 (本地)" },
 ];
 
 export const ServerAddressSelector: React.FC<ServerAddressSelectorProps> = ({ variant }) => {

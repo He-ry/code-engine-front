@@ -19,6 +19,8 @@ import {
   PieChart,
   LogOut,
   X,
+  Loader2,
+  CheckCircle2,
 } from "lucide-react";
 
 const SplitPanelLeftIcon: React.FC<{ className?: string; isCollapsed?: boolean }> = ({
@@ -92,6 +94,9 @@ interface SidebarProps {
   onOpenSettings?: (category?: SettingsCategory) => void;
   onMouseEnter?: () => void;
   onMouseLeave?: () => void;
+  activeThreadId?: string | null;
+  isGenerating?: boolean;
+  resolvedThreadIds?: Set<string>;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -109,6 +114,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenSettings,
   onMouseEnter,
   onMouseLeave,
+  activeThreadId,
+  isGenerating,
+  resolvedThreadIds,
 }) => {
   const { t, user, logout, backendApiUrl } = useSettings();
   const [projectSearch, setProjectSearch] = useState("");
@@ -514,6 +522,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                           {currentName}
                                         </span>
                                       </span>
+                                    )}
+                                    {/* Status indicator: spinner while generating, checkmark when done */}
+                                    {!isEditing && isGenerating && activeThreadId === thread.id && (
+                                      <Loader2 className="w-3 h-3 text-blue-500 dark:text-blue-400 shrink-0 animate-spin" />
+                                    )}
+                                    {!isEditing && !isGenerating && resolvedThreadIds?.has(thread.id) && (
+                                      <CheckCircle2 className="w-3 h-3 text-green-500 dark:text-green-400 shrink-0" />
                                     )}
                                     {timeLabel && !isEditing && (
                                       <span className="hidden group-hover/thread:inline text-[10px] text-gray-400 dark:text-zinc-500 font-mono shrink-0 whitespace-nowrap">

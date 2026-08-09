@@ -172,7 +172,7 @@ export async function sendMessage(
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,
     },
-    body: JSON.stringify({ model_id: modelId, text, approval_policy: approvalPolicy || "unless_trusted" }),
+    body: JSON.stringify({ model_id: modelId, text, approval_policy: approvalPolicy || "auto" }),
   });
   if (!res.ok) throw new Error(await detail(res));
   const json = await res.json();

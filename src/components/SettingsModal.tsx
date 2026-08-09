@@ -1717,10 +1717,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       </div>
                       <div className="grid grid-cols-2 gap-2">
                         {([
-                          { value: "never", label: t("从不询问", "Never Ask"), desc: t("全自动执行（除写入文件）", "Auto-run everything (except file writes)") },
-                          { value: "on_request", label: t("仅拦截危险命令", "Dangerous Only"), desc: t("rm/sudo/curl|sh 等才需确认", "Only prompt for rm/sudo/curl|sh etc.") },
-                          { value: "unless_trusted", label: t("信任安全命令", "Trust Safe"), desc: t("已知读命令放行，其他需审批", "Known-safe read commands allowed, others prompt") },
-                          { value: "always", label: t("始终询问", "Always Ask"), desc: t("每个工具调用都要确认", "Prompt for every tool invocation") },
+                          { value: "auto", label: t("自动执行", "Auto"), desc: t("仅危险命令（rm/sudo/kill 等）需确认", "Only prompt for dangerous commands (rm/sudo/kill etc.)") },
+                          { value: "strict", label: t("始终询问", "Strict"), desc: t("每个工具调用都需确认", "Prompt for every tool invocation") },
                         ] as const).map(({ value, label, desc }) => {
                           const isActive = approvalPolicy === value;
                           return (
