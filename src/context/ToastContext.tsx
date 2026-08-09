@@ -133,27 +133,27 @@ const ToastCard: React.FC<{ toast: ToastItem; onClose: () => void }> = ({ toast,
       case "success":
         return {
           icon: <Check className="w-3.5 h-3.5 stroke-[2.5]" />,
-          iconBg: "bg-emerald-500/12 text-emerald-600 dark:text-emerald-400 dark:bg-emerald-500/20",
-          progressColor: "bg-emerald-500",
+          iconBg: "bg-gray-100 dark:bg-zinc-800 text-gray-500 dark:text-zinc-400",
+          progressColor: "bg-gray-400 dark:bg-zinc-500",
         };
       case "error":
         return {
           icon: <X className="w-3.5 h-3.5 stroke-[2.5]" />,
-          iconBg: "bg-rose-500/12 text-rose-600 dark:text-rose-400 dark:bg-rose-500/20",
-          progressColor: "bg-rose-500",
+          iconBg: "bg-gray-100 dark:bg-zinc-800 text-gray-500 dark:text-zinc-400",
+          progressColor: "bg-gray-400 dark:bg-zinc-500",
         };
       case "warning":
         return {
           icon: <AlertCircle className="w-3.5 h-3.5 stroke-[2.5]" />,
-          iconBg: "bg-amber-500/12 text-amber-600 dark:text-amber-400 dark:bg-amber-500/20",
-          progressColor: "bg-amber-500",
+          iconBg: "bg-gray-100 dark:bg-zinc-800 text-gray-500 dark:text-zinc-400",
+          progressColor: "bg-gray-400 dark:bg-zinc-500",
         };
       case "info":
       default:
         return {
           icon: <Info className="w-3.5 h-3.5 stroke-[2.5]" />,
-          iconBg: "bg-blue-500/12 text-blue-600 dark:text-blue-400 dark:bg-blue-500/20",
-          progressColor: "bg-blue-500",
+          iconBg: "bg-gray-100 dark:bg-zinc-800 text-gray-500 dark:text-zinc-400",
+          progressColor: "bg-gray-400 dark:bg-zinc-500",
         };
     }
   };
@@ -167,14 +167,14 @@ const ToastCard: React.FC<{ toast: ToastItem; onClose: () => void }> = ({ toast,
       animate={{ opacity: 1, y: 0, scale: 1 }}
       exit={{ opacity: 0, y: -10, scale: 0.95 }}
       transition={{ type: "spring", stiffness: 450, damping: 30 }}
-      className="pointer-events-auto relative overflow-hidden rounded-xl border border-gray-200/90 dark:border-zinc-800/90 bg-white/95 dark:bg-[#18181b]/95 backdrop-blur-md p-3.5 shadow-xl shadow-black/5 dark:shadow-black/40 text-left font-sans"
+      className="pointer-events-auto relative overflow-hidden rounded-[6px] border border-gray-200/90 dark:border-zinc-800/90 bg-white/95 dark:bg-[#18181b]/95 backdrop-blur-md p-3.5 shadow-xl shadow-black/5 dark:shadow-black/40 text-left font-sans"
     >
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex items-start gap-3">
-          <div className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 mt-0.5 ${style.iconBg}`}>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 ${style.iconBg}`}>
             {style.icon}
           </div>
-          <div className="space-y-0.5 pt-0.5">
+          <div className="space-y-0.5">
             <h4 className="text-xs font-semibold text-gray-900 dark:text-zinc-100 tracking-tight leading-snug">
               {toast.title}
             </h4>

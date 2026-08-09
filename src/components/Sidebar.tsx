@@ -133,6 +133,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [deletingThreadId, setDeletingThreadId] = useState<string | null>(null);
   const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
   const [menuThreadId, setMenuThreadId] = useState<string | null>(null);
+  const [menuPosition, setMenuPosition] = useState<{x: number; y: number} | null>(null);
   const [editingThreadId, setEditingThreadId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const editInputRef = useRef<HTMLInputElement>(null);
@@ -146,6 +147,27 @@ export const Sidebar: React.FC<SidebarProps> = ({
       editInputRef.current.select();
     }
   }, [editingThreadId]);
+
+  // Listen for newly created threads so they appear without a page refresh.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { projectId, thread } = (e as CustomEvent).detail;
+      if (!projectId || !thread) return;
+      setProjectThreads((prev) => {
+        const existing = prev[projectId] || [];
+        if (existing.some((t: any) => t.id === thread.threadId)) return prev; // already present
+        return {
+          ...prev,
+          [projectId]: [
+            { id: thread.threadId, name: thread.name, created_at: thread.createdAt },
+            ...existing,
+          ],
+        };
+      });
+    };
+    window.addEventListener("app:thread_created", handler);
+    return () => window.removeEventListener("app:thread_created", handler);
+  }, []);
 
   const handleCreateProject = () => {
     const name = newProjectName.trim();
@@ -171,15 +193,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
     }
   };
 
-  // Auto-load threads for the active project on switch
+  // Auto-load threads for the active project on switch (collapse others).
   React.useEffect(() => {
     if (activeProjectId) {
       loadProjectThreads(activeProjectId);
-      // Also auto-expand the active project in the tree
-      setExpandedProjects((prev) => {
-        if (prev[activeProjectId]) return prev;
-        return { ...prev, [activeProjectId]: true };
-      });
+      setExpandedProjects({ [activeProjectId]: true });
     }
   }, [activeProjectId]);
 
@@ -240,7 +258,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   <Plus className="w-3.5 h-3.5 text-gray-500 dark:text-[#a3a3a3]" />
                   <span className="font-normal">{t("新任务", "New Task")}</span>
                 </div>
-                <span className="text-[10px] text-gray-400 dark:text-[#a3a3a3] font-mono">⌘N</span>
               </button>
 
               <button className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-[#262626] text-gray-700 dark:text-[#ededed] transition-colors cursor-pointer text-xs">
@@ -268,7 +285,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   <Settings className="w-3.5 h-3.5 text-gray-500 dark:text-zinc-400" />
                   <span className="font-normal">{t("设置", "Settings")}</span>
                 </div>
-                <span className="text-[10px] text-gray-400 dark:text-zinc-500 font-mono">⌘,</span>
               </button>
             </div>
 
@@ -433,8 +449,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         </div>
 
                         {/* Collapsible Details — conversations */}
-                        {isExpanded && (
-                          <div className="pl-8 pr-2 pb-2 text-xs text-gray-500 dark:text-zinc-400 space-y-0.5">
+                        <AnimatePresence initial={false}>
+                          {isExpanded && (
+                            <motion.div
+                              initial={{ height: 0, opacity: 0 }}
+                              animate={{ height: "auto", opacity: 1 }}
+                              exit={{ height: 0, opacity: 0 }}
+                              transition={{ duration: 0.2, ease: "easeInOut" }}
+                              className="overflow-hidden pl-8 pr-2 pb-2 text-xs text-gray-500 dark:text-zinc-400 space-y-0.5"
+                            >
                             {(() => {
                               const threads = projectThreads[proj.id];
                               if (!threads) {
@@ -454,9 +477,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
                               return threads.map((thread: any) => {
                                 const createdAt = thread.created_at || thread.createdAt;
                                 const timeLabel = createdAt
-                                  ? String(new Date(createdAt).getMonth() + 1).padStart(2, "0") +
-                                    "-" +
-                                    String(new Date(createdAt).getDate()).padStart(2, "0")
+                                  ? (() => {
+                                      const d = new Date(createdAt);
+                                      const month = String(d.getMonth() + 1).padStart(2, "0");
+                                      const day = String(d.getDate()).padStart(2, "0");
+                                      const hour = String(d.getHours()).padStart(2, "0");
+                                      const min = String(d.getMinutes()).padStart(2, "0");
+                                      return `${month}-${day} ${hour}:${min}`;
+                                    })()
                                   : "";
                                 const currentName = thread.name || thread.last_message_preview || thread.id;
                                 const isEditing = editingThreadId === thread.id;
@@ -525,10 +553,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                     )}
                                     {/* Status indicator: spinner while generating, checkmark when done */}
                                     {!isEditing && isGenerating && activeThreadId === thread.id && (
-                                      <Loader2 className="w-3 h-3 text-blue-500 dark:text-blue-400 shrink-0 animate-spin" />
+                                      <Loader2 className="w-3 h-3 text-gray-400 dark:text-zinc-500 shrink-0 animate-spin" />
                                     )}
                                     {!isEditing && !isGenerating && resolvedThreadIds?.has(thread.id) && (
-                                      <CheckCircle2 className="w-3 h-3 text-green-500 dark:text-green-400 shrink-0" />
+                                      <CheckCircle2 className="w-3 h-3 text-gray-400 dark:text-zinc-500 shrink-0" />
                                     )}
                                     {timeLabel && !isEditing && (
                                       <span className="hidden group-hover/thread:inline text-[10px] text-gray-400 dark:text-zinc-500 font-mono shrink-0 whitespace-nowrap">
@@ -542,43 +570,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                         title={t("更多操作", "More")}
                                         onClick={(e) => {
                                           e.stopPropagation();
-                                          setMenuThreadId(menuThreadId === thread.id ? null : thread.id);
+                                          if (menuThreadId === thread.id) {
+                                            setMenuThreadId(null);
+                                            setMenuPosition(null);
+                                          } else {
+                                            const rect = e.currentTarget.getBoundingClientRect();
+                                            setMenuThreadId(thread.id);
+                                            setMenuPosition({ x: rect.right, y: rect.bottom });
+                                          }
                                         }}
                                       >
                                         <MoreHorizontal className="w-3 h-3" />
                                       </button>
-                                      {/* Dropdown menu */}
-                                      {menuThreadId === thread.id && (
-                                        <>
-                                          <div className="fixed inset-0 z-40" onClick={() => setMenuThreadId(null)} />
-                                          <div className="absolute right-0 top-full mt-1 z-50 rounded-md border border-gray-200 dark:border-zinc-800 bg-white dark:bg-[#1a1a1e] shadow-xl shadow-black/5 dark:shadow-black/30 p-1 text-xs font-sans w-32">
-                                            <button
-                                              className="w-full px-3 py-1.5 text-left text-gray-700 dark:text-zinc-300 hover:bg-gray-300/40 dark:hover:bg-zinc-800/80 rounded transition-colors cursor-pointer flex items-center gap-2 text-[12px]"
-                                              onClick={(e) => {
-                                                e.stopPropagation();
-                                                setMenuThreadId(null);
-                                                setEditingThreadId(thread.id);
-                                                setEditName(currentName);
-                                              }}
-                                            >
-                                              <Pencil className="w-3 h-3 text-gray-400" />
-                                              {t("重命名", "Rename")}
-                                            </button>
-                                            <button
-                                              className="w-full px-3 py-1.5 text-left text-gray-700 dark:text-zinc-300 hover:bg-gray-300/40 dark:hover:bg-zinc-800/80 rounded transition-colors cursor-pointer flex items-center gap-2 text-[12px]"
-                                              onClick={(e) => {
-                                                e.stopPropagation();
-                                                setMenuThreadId(null);
-                                                setDeletingThreadId(thread.id);
-                                                setDeletingProjectId(proj.id);
-                                              }}
-                                            >
-                                              <Trash2 className="w-3 h-3 text-gray-400" />
-                                              {t("删除", "Delete")}
-                                            </button>
-                                          </div>
-                                        </>
-                                      )}
                                     </div>
                                   </div>
 
@@ -586,8 +589,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                 );
                               });
                             })()}
-                          </div>
-                        )}
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
                       </div>
                     );
                   })}
@@ -684,7 +688,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     <span>{t("确认删除", "Confirm Delete")}</span>
                   </div>
                   <p className="text-xs text-gray-600 dark:text-zinc-300 leading-relaxed">
-                    {t("删除后无法恢复，确定删除吗？", "This action cannot be undone. Are you sure?")}
+                    {t("删除后任务无法恢复，确定删除吗？", "This action cannot be undone. Are you sure?")}
                   </p>
                 </div>
                 <div className="px-5 py-3 bg-gray-50 dark:bg-zinc-900/50 border-t border-gray-200 dark:border-zinc-800 flex justify-end gap-2">
@@ -725,6 +729,54 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </div>
           )}
         </AnimatePresence>
+        {/* Thread action dropdown — rendered outside the scroll container with fixed positioning */}
+        {menuThreadId && menuPosition && (() => {
+          // Find the thread and its project from the open menu ID
+          let threadData: any = null;
+          let threadProjectId = "";
+          for (const [pId, threads] of Object.entries(projectThreads)) {
+            const found = threads.find((t: any) => t.id === menuThreadId);
+            if (found) { threadData = found; threadProjectId = pId; break; }
+          }
+          if (!threadData) return null;
+          const currentName = threadData.name || threadData.last_message_preview || threadData.id;
+          return (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => { setMenuThreadId(null); setMenuPosition(null); }} />
+              <div
+                className="fixed z-50 rounded-md border border-gray-200 dark:border-zinc-800 bg-white dark:bg-[#1a1a1e] shadow-xl shadow-black/5 dark:shadow-black/30 p-1 text-xs font-sans w-32"
+                style={{ top: menuPosition.y + 4, left: menuPosition.x - 128 }}
+              >
+                <button
+                  className="w-full px-3 py-1.5 text-left text-gray-700 dark:text-zinc-300 hover:bg-gray-300/40 dark:hover:bg-zinc-800/80 rounded transition-colors cursor-pointer flex items-center gap-2 text-[12px]"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setMenuThreadId(null);
+                    setMenuPosition(null);
+                    setEditingThreadId(menuThreadId);
+                    setEditName(currentName);
+                  }}
+                >
+                  <Pencil className="w-3 h-3 text-gray-400" />
+                  {t("重命名", "Rename")}
+                </button>
+                <button
+                  className="w-full px-3 py-1.5 text-left text-gray-700 dark:text-zinc-300 hover:bg-gray-300/40 dark:hover:bg-zinc-800/80 rounded transition-colors cursor-pointer flex items-center gap-2 text-[12px]"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setMenuThreadId(null);
+                    setMenuPosition(null);
+                    setDeletingThreadId(menuThreadId);
+                    setDeletingProjectId(threadProjectId);
+                  }}
+                >
+                  <Trash2 className="w-3 h-3 text-gray-400" />
+                  {t("删除", "Delete")}
+                </button>
+              </div>
+            </>
+          );
+        })()}
     </>
       );
     };

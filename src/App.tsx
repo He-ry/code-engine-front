@@ -54,12 +54,17 @@ const getInitialSettingsState = () => {
 };
 
 export default function App() {
-  const { t, language, isLangSwitching, isThemeSwitching, theme, isLoggedIn, user, backendApiUrl, login, backendModels, defaultModel, approvalPolicy } = useSettings();
+  const { t, language, isLangSwitching, isThemeSwitching, theme, isLoggedIn, user, backendApiUrl, login, backendModels, defaultModel, approvalPolicy, setApprovalPolicy } = useSettings();
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
   const initialProjectId = getInitialProjectId();
   const initialSettings = getInitialSettingsState();
   const [activeProjectId, setActiveProjectId] = useState<string>(initialProjectId);
+  const activeProjectIdRef = useRef<string>(initialProjectId);
+  // Keep ref in sync so async callbacks always read the latest project id.
+  React.useEffect(() => {
+    activeProjectIdRef.current = activeProjectId;
+  }, [activeProjectId]);
   const [sidebarPinned, setSidebarPinned] = useState<boolean>(true);
   const [sidebarHovered, setSidebarHovered] = useState<boolean>(false);
   const hoverTimeoutRef = React.useRef<NodeJS.Timeout | null>(null);
@@ -303,6 +308,23 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
   const [resolvedThreadIds, setResolvedThreadIds] = useState<Set<string>>(new Set());
+  const resolvedTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+
+  /** Show checkmark briefly then auto-dismiss after 3 s. */
+  const markThreadResolved = (threadId: string) => {
+    const existing = resolvedTimersRef.current.get(threadId);
+    if (existing) clearTimeout(existing);
+    setResolvedThreadIds((prev) => new Set([...prev, threadId]));
+    const timer = setTimeout(() => {
+      setResolvedThreadIds((prev) => {
+        const next = new Set(prev);
+        next.delete(threadId);
+        return next;
+      });
+      resolvedTimersRef.current.delete(threadId);
+    }, 1000);
+    resolvedTimersRef.current.set(threadId, timer);
+  };
   // Default to the user's configured default model so the first send
   // doesn't fall through to an arbitrary enabled model.
   const [selectedModel, setSelectedModel] = useState<string>(() =>
@@ -311,6 +333,17 @@ export default function App() {
   const [selectedMode, setSelectedMode] = useState<string>(() =>
     language === "en-US" ? "Auto Accept Edits" : "自动接受编辑"
   );
+
+  // Sync ModeMenu selection to approvalPolicy so the chat-interface
+  // mode selector actually takes effect on the next API call.
+  const handleModeChange = (mode: string) => {
+    setSelectedMode(mode);
+    if (mode === "始终询问" || mode === "Strict") {
+      setApprovalPolicy("strict");
+    } else if (mode === "自动执行" || mode === "Auto") {
+      setApprovalPolicy("auto");
+    }
+  };
 
   // Agent backend wiring
   const threadIdRef = useRef<string | null>(null);
@@ -513,6 +546,7 @@ export default function App() {
         conversations: [],
       };
       setProjects((prev) => [...prev, mapped]);
+      activeProjectIdRef.current = mapped.id;
       setActiveProjectId(mapped.id);
       setMessages([]);
       threadIdRef.current = null;
@@ -601,7 +635,7 @@ export default function App() {
         (e) => console.warn("Interrupt failed:", e)
       );
     }
-    setResolvedThreadIds((prev) => new Set([...prev, threadId]));
+    markThreadResolved(threadId);
     setIsGenerating(false);
   };
 
@@ -931,23 +965,32 @@ export default function App() {
         const approvalId = data.approvalId || data.approval_id || "";
         const toolName = data.toolName || data.tool_name || "";
         const args = data.arguments || {};
+        const execCmd = args.command || args.path || args.query || args.pattern || toolName;
         setPendingApprovals((prev) => ({
           ...prev,
           [approvalId]: { approvalId, toolName, arguments: args },
         }));
         setMessages((prev) =>
-          prev.map((m) =>
-            m.id === aiMsgId
-              ? {
-                  ...m,
-                  toolExecutions: (m.toolExecutions || []).map((te) =>
-                    te.id === approvalId
-                      ? { ...te, status: "pending" as const }
-                      : te
-                  ),
-                }
-              : m
-          )
+          prev.map((m) => {
+            if (m.id !== aiMsgId) return m;
+            const tools = [...(m.toolExecutions || [])];
+            const existingIdx = tools.findIndex((te) => te.id === approvalId);
+            if (existingIdx >= 0) {
+              // Update existing tool card (created by item_started) to pending
+              tools[existingIdx] = { ...tools[existingIdx], status: "pending" as const };
+            } else {
+              // item_started may have been dropped under queue pressure —
+              // create a placeholder tool card so the user sees the approval UI
+              tools.push({
+                id: approvalId,
+                name: toolName,
+                command: execCmd,
+                status: "pending" as const,
+                createdAt: now,
+              });
+            }
+            return { ...m, toolExecutions: tools };
+          })
         );
         break;
       }
@@ -1137,9 +1180,15 @@ export default function App() {
       let threadId = threadIdRef.current;
       if (!threadId) {
         const threadName = text.length > 30 ? text.slice(0, 30) + "..." : text;
-        const created = await createThread(baseUrl, token, modelId, threadName, activeProjectId, approvalPolicy);
+        const created = await createThread(baseUrl, token, modelId, threadName, activeProjectIdRef.current, approvalPolicy);
         threadId = created.threadId;
         threadIdRef.current = threadId;
+        // Notify Sidebar so the new thread appears without a page refresh.
+        window.dispatchEvent(
+          new CustomEvent("app:thread_created", {
+            detail: { projectId: activeProjectId, thread: created },
+          })
+        );
       }
 
       // 2. Submit the user message (agent runs in the background).
@@ -1152,7 +1201,7 @@ export default function App() {
       }, controller.signal);
 
       // Mark the message complete when the stream ends normally.
-      setResolvedThreadIds((prev) => new Set([...prev, threadId]));
+      markThreadResolved(threadId);
       setMessages((prev) =>
         prev.map((m) =>
           m.id === aiMsgId
@@ -1162,7 +1211,7 @@ export default function App() {
       );
     } catch (err: any) {
       const msg = err?.message || "Agent request failed";
-      setResolvedThreadIds((prev) => new Set([...prev, threadId]));
+      markThreadResolved(threadId);
       setMessages((prev) =>
         prev.map((m) =>
           m.id === aiMsgId
@@ -1277,6 +1326,8 @@ export default function App() {
         onSelectProject={(id) => {
           setMessages([]);
           setOpenTabs([]);
+          threadIdRef.current = null;
+          activeProjectIdRef.current = id;
           setActiveProjectId(id);
           if (!isSettingsOpen) {
             navigate(`/project/${id}`);
@@ -1301,6 +1352,7 @@ export default function App() {
           onSelectProject={(id) => {
             setMessages([]);
             threadIdRef.current = null;
+            activeProjectIdRef.current = id;
             setActiveProjectId(id);
             if (!isSettingsOpen) {
               navigate(`/project/${id}`);
@@ -1397,6 +1449,8 @@ export default function App() {
                                           onClick={() => {
                                             setMessages([]);
                                             setOpenTabs([]);
+                                            threadIdRef.current = null;
+                                            activeProjectIdRef.current = proj.id;
                                             setActiveProjectId(proj.id);
                                             if (!isSettingsOpen) {
                                               navigate(`/project/${proj.id}`);
@@ -1434,7 +1488,7 @@ export default function App() {
                         selectedModel={selectedModel}
                         onModelChange={setSelectedModel}
                         selectedMode={selectedMode}
-                        onModeChange={setSelectedMode}
+                        onModeChange={handleModeChange}
                         isGenerating={isGenerating}
                         onStop={handleStopGeneration}
                         onSelectRecommendation={(promptText) =>
@@ -1465,7 +1519,7 @@ export default function App() {
                           selectedModel={selectedModel}
                           onModelChange={setSelectedModel}
                           selectedMode={selectedMode}
-                          onModeChange={setSelectedMode}
+                          onModeChange={handleModeChange}
                           isGenerating={isGenerating}
                           onStop={handleStopGeneration}
                         />
