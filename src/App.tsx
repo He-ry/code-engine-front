@@ -1533,7 +1533,7 @@ export default function App() {
                     : "100%",
               }}
               transition={isResizingChat || isResizingRight ? { duration: 0 } : { duration: 0.28, ease: [0.2, 0, 0, 1] }}
-              className="flex flex-col bg-[#ffffff] dark:bg-zinc-950 relative overflow-y-auto shrink-0 h-full"
+              className="flex flex-col bg-[#ffffff] dark:bg-zinc-950 relative shrink-0 h-full"
             >
               <AnimatePresence mode="wait">
                 <motion.div

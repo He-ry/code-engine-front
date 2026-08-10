@@ -431,7 +431,6 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
         >
           {line ? (
             <span
-              className={isReviewing ? "text-emerald-800 dark:text-emerald-300" : "text-gray-800 dark:text-zinc-200"}
               dangerouslySetInnerHTML={{ __html: highlighted }}
             />
           ) : (
@@ -464,6 +463,53 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
         isMaximized ? "fixed inset-0 z-50 bg-white dark:bg-[#0b0b0b]" : ""
       }`}
     >
+      {/* ── highlight.js GitHub-style theme (light & dark) ── */}
+      <style>{`
+        /* Light theme — GitHub */
+        .hljs { color: #24292e; }
+        .hljs-keyword, .hljs-selector-tag, .hljs-deletion,
+        .hljs-literal, .hljs-section, .hljs-link { color: #d73a49; }
+        .hljs-string, .hljs-addition, .hljs-attribute { color: #032f62; }
+        .hljs-number, .hljs-literal { color: #005cc5; }
+        .hljs-comment { color: #6a737d; font-style: italic; }
+        .hljs-title, .hljs-meta, .hljs-type { color: #6f42c1; }
+        .hljs-built_in, .hljs-title.class_ { color: #6f42c1; }
+        .hljs-variable, .hljs-template-variable, .hljs-attr { color: #e36209; }
+        .hljs-params { color: #24292e; }
+        .hljs-function .hljs-title { color: #6f42c1; }
+        .hljs-tag { color: #22863a; }
+        .hljs-name { color: #22863a; }
+        .hljs-regexp, .hljs-symbol, .hljs-template-tag { color: #032f62; }
+        .hljs-selector-id, .hljs-selector-class { color: #6f42c1; }
+        .hljs-doctag, .hljs-strong { font-weight: bold; }
+        .hljs-emphasis { font-style: italic; }
+        .hljs-bullet { color: #735c0f; }
+        .hljs-code { color: #005cc5; }
+        .hljs-quote { color: #6a737d; }
+
+        /* Dark theme — GitHub Dark */
+        .dark .hljs { color: #c9d1d9; }
+        .dark .hljs-keyword, .dark .hljs-selector-tag, .dark .hljs-deletion,
+        .dark .hljs-literal, .dark .hljs-section, .dark .hljs-link { color: #ff7b72; }
+        .dark .hljs-string, .dark .hljs-addition, .dark .hljs-attribute { color: #a5d6ff; }
+        .dark .hljs-number, .dark .hljs-literal { color: #79c0ff; }
+        .dark .hljs-comment { color: #8b949e; font-style: italic; }
+        .dark .hljs-title, .dark .hljs-meta, .dark .hljs-type { color: #d2a8ff; }
+        .dark .hljs-built_in, .dark .hljs-title.class_ { color: #d2a8ff; }
+        .dark .hljs-variable, .dark .hljs-template-variable, .dark .hljs-attr { color: #ffa657; }
+        .dark .hljs-params { color: #c9d1d9; }
+        .dark .hljs-function .hljs-title { color: #d2a8ff; }
+        .dark .hljs-tag { color: #7ee787; }
+        .dark .hljs-name { color: #7ee787; }
+        .dark .hljs-regexp, .dark .hljs-symbol, .dark .hljs-template-tag { color: #a5d6ff; }
+        .dark .hljs-selector-id, .dark .hljs-selector-class { color: #d2a8ff; }
+        .dark .hljs-doctag, .dark .hljs-strong { font-weight: bold; }
+        .dark .hljs-emphasis { font-style: italic; }
+        .dark .hljs-bullet { color: #d2a8ff; }
+        .dark .hljs-code { color: #79c0ff; }
+        .dark .hljs-quote { color: #8b949e; }
+      `}</style>
+
       {/* IDE Style Open Tab Strip */}
       {tabs.length > 0 && (
         <div className="h-8 bg-[#f3f3f5] dark:bg-[#171717] border-b border-gray-200/90 dark:border-[#2a2a2a] flex items-stretch overflow-x-auto scrollbar-none shrink-0 z-10 font-sans">

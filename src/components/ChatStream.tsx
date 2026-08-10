@@ -108,8 +108,20 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
     }
   }, [messages, isGenerating]);
 
-  const copyToClipboard = (text: string, id: string) => {
-    navigator.clipboard.writeText(text);
+  const copyToClipboard = async (text: string, id: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // Fallback for older browsers or permission denied
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
     setCopiedId(id);
     setTimeout(() => setCopiedId(null), 2000);
   };
@@ -183,6 +195,13 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
 
   return (
     <div ref={containerRef} className="flex-1 overflow-y-auto no-scrollbar px-6 py-8 space-y-7 max-w-3xl mx-auto w-full font-sans select-text">
+      {/* Global shimmer keyframes — used by ThinkingLoader, thought toggle, file-stream */}
+      <style>{`
+        @keyframes thinking-shimmer {
+          0% { background-position: 100% 0%; }
+          100% { background-position: 0% 0%; }
+        }
+      `}</style>
       {messages.map((msg, msgIdx) => {
         const isUser = msg.sender === "user";
         const isLiked = likedMessages[msg.id];
@@ -210,12 +229,11 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
               )}
 
               {/* User Bubble - Right aligned */}
-              <div className="relative inline-block px-3.5 py-1.5 bg-[#e8e8e8] dark:bg-zinc-800 text-gray-900 dark:text-zinc-100 rounded-xl text-[13px] leading-relaxed max-w-[85%] break-words">
-                {msg.text}
+              <div className="flex items-center gap-1">
                 {/* Copy button — appears on hover */}
                 <button
                   onClick={() => copyToClipboard(msg.text, msg.id)}
-                  className="absolute -left-7 top-1/2 -translate-y-1/2 p-1 text-gray-400 dark:text-zinc-500 hover:text-gray-600 dark:hover:text-zinc-200 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer rounded"
+                  className="p-1 text-gray-400 dark:text-zinc-500 hover:text-gray-600 dark:hover:text-zinc-200 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer rounded shrink-0"
                   title={t("复制", "Copy")}
                 >
                   {copiedId === msg.id ? (
@@ -224,6 +242,9 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
                     <Copy className="w-3 h-3" />
                   )}
                 </button>
+                <div className="px-3.5 py-1.5 bg-[#e8e8e8] dark:bg-zinc-800 text-gray-900 dark:text-zinc-100 rounded-xl text-[13px] leading-relaxed max-w-[85%] break-words">
+                  {msg.text}
+                </div>
               </div>
             </div>
           );
@@ -439,8 +460,21 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
                       ) : (
                         <ChevronDown className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500" />
                       )}
-                      <span className="font-sans text-xs tracking-tight">
+                      <span
+                        className="font-sans text-xs tracking-tight relative"
+                        style={msg.isStreaming ? {
+                          backgroundImage:
+                            "linear-gradient(90deg, #9ca3af 0%, #9ca3af 40%, #1f2937 50%, #6b7280 60%, #9ca3af 100%)",
+                          backgroundSize: "200% 100%",
+                          WebkitBackgroundClip: "text",
+                          backgroundClip: "text",
+                          color: "transparent",
+                          animation: "thinking-shimmer 2s ease-in-out infinite",
+                          animationDirection: "alternate",
+                        } : undefined}
+                      >
                         {t("思考", "Thinking")}
+                        {msg.isStreaming && <span className="animate-pulse ml-0.5" style={{ color: "#6b7280" }}>...</span>}
                       </span>
                       {item.tp.durationSec && (
                         <span className="text-[11px] text-gray-400 dark:text-zinc-500 font-mono opacity-80">
@@ -449,7 +483,10 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
                       )}
                     </button>
                     {!isThoughtCollapsed && (
-                      <div className="mt-1.5 pl-3 border-l border-gray-200 dark:border-zinc-800/80 text-xs text-gray-500 dark:text-zinc-400 leading-relaxed font-sans space-y-1 py-0.5 whitespace-pre-wrap max-h-60 overflow-y-auto">
+                      <div
+                        className="mt-1.5 pl-3 border-l border-gray-200 dark:border-zinc-800/80 text-xs text-gray-500 dark:text-zinc-400 leading-relaxed font-sans space-y-1 py-0.5 whitespace-pre-wrap max-h-60 overflow-y-auto"
+                        ref={(el) => { if (el) el.scrollTop = el.scrollHeight; }}
+                      >
                         {item.tp.thoughtText}
                       </div>
                     )}
@@ -487,9 +524,21 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
                       ) : (
                         <ChevronDown className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500" />
                       )}
-                      <Loader2 className="w-3 h-3 animate-spin shrink-0" />
-                      <span className="font-sans text-xs tracking-tight">
-                        {t("正在生成文件内容...", "Generating file content...")}
+                      <span
+                        className="font-sans text-xs tracking-tight relative"
+                        style={{
+                          backgroundImage:
+                            "linear-gradient(90deg, #9ca3af 0%, #9ca3af 40%, #1f2937 50%, #6b7280 60%, #9ca3af 100%)",
+                          backgroundSize: "200% 100%",
+                          WebkitBackgroundClip: "text",
+                          backgroundClip: "text",
+                          color: "transparent",
+                          animation: "thinking-shimmer 2s ease-in-out infinite",
+                          animationDirection: "alternate",
+                        }}
+                      >
+                        {t("正在写入文件", "Writing file...")}
+                        <span className="animate-pulse ml-0.5" style={{ color: "#6b7280" }}>...</span>
                       </span>
                     </button>
                     {!isCollapsed && (

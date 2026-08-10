@@ -272,9 +272,21 @@ export const FileChangeCard: React.FC<FileChangeCardProps> = ({
           ) : (
             <ChevronRight className="w-3.5 h-3.5 shrink-0" />
           )}
-          <Loader2 className="w-3 h-3 animate-spin shrink-0" />
-          <span className="font-sans text-xs tracking-tight">
-            {t("正在生成文件内容...", "Generating file content...")}
+          <span
+            className="font-sans text-xs tracking-tight relative"
+            style={{
+              backgroundImage:
+                "linear-gradient(90deg, #9ca3af 0%, #9ca3af 40%, #1f2937 50%, #6b7280 60%, #9ca3af 100%)",
+              backgroundSize: "200% 100%",
+              WebkitBackgroundClip: "text",
+              backgroundClip: "text",
+              color: "transparent",
+              animation: "thinking-shimmer 2s ease-in-out infinite",
+              animationDirection: "alternate",
+            }}
+          >
+            {t("正在写入文件", "Writing file...")}
+            <span className="animate-pulse ml-0.5" style={{ color: "#6b7280" }}>...</span>
           </span>
         </button>
         {streamExpanded && (
@@ -324,77 +336,62 @@ export const FileChangeCard: React.FC<FileChangeCardProps> = ({
       }
     })();
 
-    // Compute line stats for a file content
-    const lineStats = (content: string) => {
-      const lines = content.split("\n");
-      const added = lines.length;
-      return { added, removed: 0 };
-    };
-
     return (
       <div className="w-full my-2 font-sans text-xs">
         <div className="w-full rounded-lg border border-gray-200/90 dark:border-zinc-800 bg-white dark:bg-zinc-900/80 overflow-hidden">
           {/* Header */}
-          <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-gray-100 dark:border-zinc-800/60">
-            <div className="flex items-center gap-2 min-w-0">
-              <FilePen className="w-3.5 h-3.5 text-orange-500 shrink-0" />
-              <span className="font-semibold text-gray-800 dark:text-zinc-200 text-[11px]">write_file</span>
-              <span className="text-gray-500 dark:text-zinc-400 text-[11px]">
-                {pendingFiles.length > 0
-                  ? t(`即将写入 ${pendingFiles.length} 个文件`, `About to write ${pendingFiles.length} file(s)`)
-                  : t("即将写入文件", "About to write file(s)")}
-              </span>
-            </div>
+          <div className="flex items-center gap-2 px-3 py-2 border-b border-gray-100 dark:border-zinc-800/60">
+            <FilePen className="w-3.5 h-3.5 text-orange-500 shrink-0" />
+            <span className="font-semibold text-gray-800 dark:text-zinc-200 text-[11px]">write_file</span>
+            <span className="text-gray-500 dark:text-zinc-400 text-[11px]">
+              {pendingFiles.length > 0
+                ? t(`即将写入 ${pendingFiles.length} 个文件`, `About to write ${pendingFiles.length} file(s)`)
+                : t("即将写入文件", "About to write file(s)")}
+            </span>
           </div>
 
-          {/* File list with previews */}
+          {/* File preview — inline, no nested cards */}
           {pendingFiles.length > 0 && (
-            <div className="px-3 py-2 space-y-2">
-              {pendingFiles.map((pf, i) => {
-                const stats = lineStats(pf.content);
-                return (
-                  <div key={`${pf.path}-${i}`} className="rounded-md border border-gray-100 dark:border-zinc-800/60 overflow-hidden">
-                    {/* File header */}
-                    <div
-                      className="flex items-center justify-between gap-2 px-2.5 py-1.5 bg-gray-50/50 dark:bg-zinc-950/50 cursor-pointer hover:bg-gray-100 dark:hover:bg-zinc-800/60 transition-colors"
-                      onClick={() => onOpenFile?.(pf.path, pf.content)}
-                    >
-                      <div className="flex items-center gap-1.5 min-w-0 flex-1">
-                        <FilePlus className="w-3 h-3 text-emerald-500 shrink-0" />
-                        <span className="font-mono text-[11px] text-gray-700 dark:text-zinc-200 truncate">
-                          {pf.path}
-                        </span>
-                        <span className="text-[9px] px-1 py-px rounded border font-medium shrink-0 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800/40">
-                          {t("新增", "Add")}
-                        </span>
-                        {stats.added > 0 && (
-                          <span className="text-emerald-600 dark:text-emerald-400 font-mono text-[10px]">+{stats.added}</span>
-                        )}
-                      </div>
-                    </div>
-                    {/* Content preview — GitHub-style (green bg + gutter for new files) */}
-                    <div className="border-t border-gray-100 dark:border-zinc-800/60 max-h-48 overflow-y-auto">
-                      {pf.content ? (
-                        pf.content.split("\n").map((line, li) => (
-                          <div key={li} className="flex bg-emerald-50 dark:bg-emerald-950/20 min-w-max">
-                            <span className="w-5 text-center select-none shrink-0 text-emerald-500 dark:text-emerald-400 font-mono text-[11px] leading-[1.6]">
-                              +
-                            </span>
-                            <span className="w-8 text-right select-none shrink-0 text-gray-400 dark:text-zinc-600 pr-3 border-r border-emerald-200 dark:border-emerald-800/30 mr-3 font-mono text-[11px] leading-[1.6]">
-                              {String(li + 1).padStart(3, " ")}
-                            </span>
-                            <span className="whitespace-pre font-mono text-[11px] leading-[1.6] text-emerald-800 dark:text-emerald-300 pr-2">
-                              {line || " "}
-                            </span>
-                          </div>
-                        ))
-                      ) : (
-                        <div className="p-2 text-gray-400 dark:text-zinc-500 text-[11px]">{t("（空文件）", "(empty file)")}</div>
-                      )}
-                    </div>
+            <div className="divide-y divide-gray-100 dark:divide-zinc-800/60">
+              {pendingFiles.map((pf, i) => (
+                <div key={`${pf.path}-${i}`}>
+                  {/* File path bar */}
+                  <div
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-50/50 dark:bg-zinc-950/50 cursor-pointer hover:bg-gray-100 dark:hover:bg-zinc-800/60 transition-colors"
+                    onClick={() => onOpenFile?.(pf.path, pf.content)}
+                  >
+                    <FilePlus className="w-3 h-3 text-emerald-500 shrink-0" />
+                    <span className="font-mono text-xs text-gray-700 dark:text-zinc-300 bg-gray-200/60 dark:bg-zinc-800 rounded px-1.5 py-0.5 truncate">
+                      {pf.path.split("/").pop() || pf.path}
+                    </span>
+                    {pf.content && (
+                      <span className="text-emerald-600 dark:text-emerald-400 font-mono text-[11px] shrink-0">
+                        +{pf.content.split("\n").length}
+                      </span>
+                    )}
                   </div>
-                );
-              })}
+                  {/* Content preview — GitHub-style diff */}
+                  {pf.content ? (
+                    <div className="max-h-48 overflow-y-auto bg-emerald-50/50 dark:bg-emerald-950/10">
+                      {pf.content.split("\n").map((line, li) => (
+                        <div key={li} className="flex min-w-max">
+                          <span className="w-5 text-center select-none shrink-0 text-emerald-500 dark:text-emerald-400 font-mono text-[11px] leading-[1.6]">
+                            +
+                          </span>
+                          <span className="w-8 text-right select-none shrink-0 text-gray-400 dark:text-zinc-600 pr-3 border-r border-emerald-200 dark:border-emerald-800/30 mr-3 font-mono text-[11px] leading-[1.6]">
+                            {String(li + 1).padStart(3, " ")}
+                          </span>
+                          <span className="whitespace-pre font-mono text-[11px] leading-[1.6] text-emerald-800 dark:text-emerald-300 pr-2">
+                            {line || " "}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="p-2 text-gray-400 dark:text-zinc-500 text-[11px]">{t("（空文件）", "(empty file)")}</div>
+                  )}
+                </div>
+              ))}
             </div>
           )}
 
@@ -411,7 +408,6 @@ export const FileChangeCard: React.FC<FileChangeCardProps> = ({
           <div className="flex items-center justify-between gap-2 px-3 py-2 border-t border-gray-100 dark:border-zinc-800/60">
             <button
               onClick={() => {
-                // Open all pending files in editor for review
                 for (const pf of pendingFiles) {
                   onOpenFile?.(pf.path, pf.content);
                 }
@@ -461,11 +457,11 @@ export const FileChangeCard: React.FC<FileChangeCardProps> = ({
   return (
     <div className="w-full text-xs transition-all font-sans">
       <div className="flex items-center gap-1.5 text-xs text-gray-400 dark:text-zinc-500 py-0.5 font-sans w-full">
-        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+        <FilePen className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 shrink-0" />
         <span className="font-sans text-xs tracking-tight font-medium text-gray-600 dark:text-zinc-300 whitespace-nowrap">
           {t(`已写入 ${fileCount} 个文件`, `Written ${fileCount} file(s)`)}
         </span>
-        {/* File names — click to open in editor */}
+        {/* File names — monospace code style, click to open */}
         {files.map((f, i) => (
           <button
             key={f.path}
@@ -473,7 +469,7 @@ export const FileChangeCard: React.FC<FileChangeCardProps> = ({
               e.stopPropagation();
               onOpenFile?.(f.path, f.content || "");
             }}
-            className="font-mono text-[10px] text-gray-500 dark:text-zinc-400 hover:text-blue-600 dark:hover:text-blue-400 truncate max-w-[200px] cursor-pointer transition-colors"
+            className="font-mono text-xs text-gray-700 dark:text-zinc-300 bg-gray-100 dark:bg-zinc-800/80 rounded px-1.5 py-0.5 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-gray-200 dark:hover:bg-zinc-700/80 truncate max-w-[220px] cursor-pointer transition-colors"
             title={f.path}
           >
             {f.path.split("/").pop() || f.path}{i < files.length - 1 ? "," : ""}
