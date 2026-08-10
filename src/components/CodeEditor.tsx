@@ -90,6 +90,7 @@ interface CodeEditorProps {
   onCloseEditor: () => void;
   onKeepFile?: (path: string) => void;
   onRevertFile?: (path: string, originalContent: string | null) => void;
+  projectId?: string;
 }
 
 interface OutlineSymbol {
@@ -107,8 +108,9 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   onCloseEditor,
   onKeepFile,
   onRevertFile,
+  projectId,
 }) => {
-  const { t } = useSettings();
+  const { t, backendApiUrl, user } = useSettings();
   const { showSuccess, showInfo } = useToast();
 
   // ── Language inference from file extension ──
@@ -164,6 +166,63 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     activeTab?.path?.startsWith("browser://") ||
     activeTab?.name === "浏览器" ||
     activeTab?.name === "Browser";
+
+  // Detect image files by extension
+  const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "svg", "webp", "ico", "bmp", "avif"]);
+  const isImageFile = (() => {
+    if (!activeTab?.name) return false;
+    const ext = activeTab.name.split(".").pop()?.toLowerCase();
+    return ext ? IMAGE_EXTENSIONS.has(ext) : false;
+  })();
+
+  // Fetch image file content and convert to data URL for preview
+  const [imageDataUrl, setImageDataUrl] = useState<string | null>(null);
+  const [imageLoading, setImageLoading] = useState(false);
+  useEffect(() => {
+    if (!isImageFile || !projectId || !activeTab) {
+      setImageDataUrl(null);
+      return;
+    }
+    const baseUrl = backendApiUrl || "https://agent.hery.cloud";
+    const token = user?.token || "";
+    const params = new URLSearchParams({ path: activeTab.path });
+    const url = `${baseUrl}/api/projects/${encodeURIComponent(projectId)}/files/read?${params}`;
+
+    let cancelled = false;
+    setImageLoading(true);
+    (async () => {
+      try {
+        const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+        if (!res.ok) { if (!cancelled) setImageLoading(false); return; }
+        const json = await res.json();
+        const content: string = json?.data?.content ?? json?.content ?? "";
+        const encoding: string = json?.data?.encoding ?? json?.encoding ?? "utf-8";
+        if (!content && !cancelled) { setImageLoading(false); return; }
+
+        // Determine MIME from extension
+        const ext = (activeTab.name.split(".").pop() || "png").toLowerCase();
+        const mimeMap: Record<string, string> = {
+          png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
+          gif: "image/gif", svg: "image/svg+xml", webp: "image/webp",
+          ico: "image/x-icon", bmp: "image/bmp", avif: "image/avif",
+        };
+        const mime = mimeMap[ext] || "image/png";
+
+        // Use encoding from backend: base64 for binary, utf-8 for text (SVG)
+        const dataUrl = encoding === "base64"
+          ? `data:${mime};base64,${content}`
+          : `data:image/svg+xml,${encodeURIComponent(content)}`;
+
+        if (!cancelled) {
+          setImageDataUrl(dataUrl);
+          setImageLoading(false);
+        }
+      } catch {
+        if (!cancelled) setImageLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isImageFile, activeTab?.path, projectId, backendApiUrl, user?.token]);
 
   const [browserUrlInput, setBrowserUrlInput] = useState<string>(
     activeTab?.content || "https://example.com"
@@ -331,6 +390,10 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
 
   const symbols = parseSymbols();
 
+  // Force read-only while a pending change is under review
+  const isReviewing = !!activeTab?.pendingChange && !activeTab.pendingChange.isConfirmed;
+  const effectiveReadOnly = isReadOnly || isReviewing;
+
   // ── highlight.js-based multi-language syntax highlighter ──
   const renderHighlightedLines = (codeLines: string[]) => {
     const fileName = activeTab?.name;
@@ -352,18 +415,23 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
         highlighted = line.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
       }
 
+      // GitHub-style green bg for pending review (new file / added lines)
+      const reviewBg = isReviewing
+        ? "bg-emerald-50 dark:bg-emerald-950/20"
+        : "";
+
       return (
         <div
           key={index}
           className={`h-6 leading-6 px-3 flex items-center ${
             wordWrap ? "whitespace-pre-wrap break-all" : "whitespace-pre"
           } font-mono text-[12px] ${
-            isCurrentLine ? "bg-blue-50/80 dark:bg-[#21262d]/80 border-l-2 border-blue-600 dark:border-[#58a6ff] -ml-[2px]" : ""
+            isCurrentLine ? "bg-blue-50/80 dark:bg-[#21262d]/80 border-l-2 border-blue-600 dark:border-[#58a6ff] -ml-[2px]" : reviewBg
           }`}
         >
           {line ? (
             <span
-              className="text-gray-800 dark:text-zinc-200"
+              className={isReviewing ? "text-emerald-800 dark:text-emerald-300" : "text-gray-800 dark:text-zinc-200"}
               dangerouslySetInnerHTML={{ __html: highlighted }}
             />
           ) : (
@@ -681,7 +749,29 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
 
       {/* Code Editor Body Area (Main Canvas + Optional Split + Optional Outline) */}
       <div className="flex-1 flex min-h-0 relative bg-white dark:bg-[#0a0a0a] overflow-hidden">
-        {isBrowserTab ? (
+        {/* Image preview */}
+        {isImageFile ? (
+          <div className="flex-1 flex items-center justify-center bg-[#fafafa] dark:bg-[#0b0b0b] p-4">
+            {imageLoading ? (
+              <div className="text-gray-400 dark:text-zinc-500 text-xs font-sans text-center space-y-2">
+                <RotateCw className="w-8 h-8 mx-auto animate-spin opacity-30" />
+                <span>{t("加载图片中...", "Loading image...")}</span>
+              </div>
+            ) : imageDataUrl ? (
+              <img
+                src={imageDataUrl}
+                alt={activeTab?.name || "image"}
+                className="max-w-full max-h-full object-contain rounded-lg shadow-lg"
+                style={{ imageRendering: "auto" }}
+              />
+            ) : (
+              <div className="text-gray-400 dark:text-zinc-500 text-xs font-sans text-center space-y-2">
+                <FileText className="w-10 h-10 mx-auto opacity-30" />
+                <span>{t("无法加载图片预览", "Cannot load image preview")}</span>
+              </div>
+            )}
+          </div>
+        ) : isBrowserTab ? (
           <div className="flex-1 flex flex-col min-h-0 bg-gray-50/50 dark:bg-[#0a0a0a] overflow-hidden font-sans">
             {/* Embedded Browser Sub-Toolbar */}
             <div className="px-4 py-2 bg-gray-100 dark:bg-[#151515] border-b border-gray-200 dark:border-zinc-800 flex items-center justify-between shrink-0 select-none text-xs gap-3">
@@ -916,7 +1006,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
               <div
                 ref={gutterRef}
                 className={`${
-                  isDiffMode ? "w-16" : "w-10"
+                  isDiffMode ? "w-16" : isReviewing ? "w-14" : "w-10"
                 } shrink-0 bg-white dark:bg-[#0a0a0a] border-r border-gray-100 dark:border-zinc-800 py-2 select-none overflow-hidden font-mono text-[12px] leading-6 text-gray-400 dark:text-zinc-500 flex flex-col items-end pr-2 gap-0 transition-all`}
               >
                 {lines.map((_, i) => {
@@ -926,10 +1016,12 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
                     <div
                       key={i}
                       onClick={() => jumpToLine(lineNum)}
-                      className={`h-6 flex items-center justify-end font-mono text-[11px] cursor-pointer hover:text-blue-500 ${
-                        isDiffMode ? "gap-3" : "w-full"
-                      } ${isCurrent ? "text-blue-700 dark:text-blue-400 font-bold" : "text-gray-400 dark:text-zinc-600"}`}
+                      className={`h-6 flex items-center justify-end font-mono text-[11px] cursor-pointer hover:text-blue-500 gap-2 ${
+                        isDiffMode ? "gap-3" : ""
+                      } ${isCurrent ? "text-blue-700 dark:text-blue-400 font-bold" : isReviewing ? "text-emerald-500 dark:text-emerald-400" : "text-gray-400 dark:text-zinc-600"}`}
                     >
+                      {/* + sign for review mode */}
+                      {isReviewing && <span className="w-3 text-left text-emerald-500 dark:text-emerald-400 font-bold">+</span>}
                       <span className="w-4 text-right">{lineNum}</span>
                       {isDiffMode && <span className="w-4 text-right text-emerald-600 dark:text-emerald-400">{lineNum}</span>}
                     </div>
@@ -951,7 +1043,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
                 <textarea
                   ref={textareaRef}
                   value={activeTab.content}
-                  readOnly={isReadOnly}
+                  readOnly={effectiveReadOnly}
                   onChange={(e) => onContentChange(activeTab.path, e.target.value)}
                   onScroll={handleScroll}
                   onClick={handleSelectionChange}

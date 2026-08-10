@@ -6,6 +6,7 @@ import { ChatMessage, ToolExecution, ThinkingProcess, TextSegment } from "../typ
 import { CodeBlock } from "./CodeBlock";
 import { ToolInvocationCard } from "./ToolInvocationCard";
 import { FileChangeCard } from "./FileChangeCard";
+import { extractStreamContent } from "./FileChangeCard";
 import { ThinkingLoader } from "./ThinkingLoader";
 import {
   Copy,
@@ -70,10 +71,40 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
     }
   });
 
-  // Auto-scroll to bottom on message changes or streaming updates
+  // Auto-scroll to bottom only when the user is already near the bottom.
+  // During streaming this lets the user scroll up to read without being
+  // yanked back — they stay in control.
+  const userScrolledUpRef = useRef(false);
+  const prevScrollTopRef = useRef(0);
+  const prevScrollHeightRef = useRef(0);
+
   useEffect(() => {
-    if (containerRef.current) {
-      containerRef.current.scrollTop = containerRef.current.scrollHeight;
+    const el = containerRef.current;
+    if (!el) return;
+
+    // Detect whether the user has manually scrolled up
+    const onScroll = () => {
+      const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      userScrolledUpRef.current = distFromBottom > 48; // 48px ≈ 3 lines tolerance
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, []);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    // If the user has scrolled up, don't auto-scroll unless new content
+    // was appended (scrollHeight grew) and they were at the bottom before.
+    const scrollHeightGrew = el.scrollHeight > prevScrollHeightRef.current;
+    const wasAtBottom = !userScrolledUpRef.current;
+
+    // Track scrollHeight so we know when new content arrives
+    prevScrollHeightRef.current = el.scrollHeight;
+
+    if (wasAtBottom || (scrollHeightGrew && !userScrolledUpRef.current)) {
+      el.scrollTop = el.scrollHeight;
     }
   }, [messages, isGenerating]);
 
@@ -159,7 +190,7 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
 
         if (isUser) {
           return (
-            <div key={msg.id} className="flex flex-col items-end w-full">
+            <div key={msg.id} className="flex flex-col items-end w-full group">
               {/* Context Pills tag if any */}
               {msg.contextPills && msg.contextPills.length > 0 && (
                 <div className="flex flex-wrap gap-1 mb-1.5 justify-end">
@@ -179,8 +210,20 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
               )}
 
               {/* User Bubble - Right aligned */}
-              <div className="inline-block px-3.5 py-1.5 bg-[#e8e8e8] dark:bg-zinc-800 text-gray-900 dark:text-zinc-100 rounded-xl text-[13px] leading-relaxed max-w-[85%] break-words">
+              <div className="relative inline-block px-3.5 py-1.5 bg-[#e8e8e8] dark:bg-zinc-800 text-gray-900 dark:text-zinc-100 rounded-xl text-[13px] leading-relaxed max-w-[85%] break-words">
                 {msg.text}
+                {/* Copy button — appears on hover */}
+                <button
+                  onClick={() => copyToClipboard(msg.text, msg.id)}
+                  className="absolute -left-7 top-1/2 -translate-y-1/2 p-1 text-gray-400 dark:text-zinc-500 hover:text-gray-600 dark:hover:text-zinc-200 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer rounded"
+                  title={t("复制", "Copy")}
+                >
+                  {copiedId === msg.id ? (
+                    <Check className="w-3 h-3 text-emerald-500" />
+                  ) : (
+                    <Copy className="w-3 h-3" />
+                  )}
+                </button>
               </div>
             </div>
           );
@@ -197,7 +240,8 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
         type StreamItem =
           | { type: "text"; text: string; key: string; time: number }
           | { type: "thought"; tp: ThinkingProcess; key: string; time: number }
-          | { type: "tool"; tool: ToolExecution; key: string; time: number };
+          | { type: "tool"; tool: ToolExecution; key: string; time: number }
+          | { type: "file-stream"; tool: ToolExecution; key: string; time: number };
 
         const streamItems: StreamItem[] = [];
 
@@ -229,12 +273,24 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
           });
         });
 
-        // Tool cards — each rendered individually (no longer grouped)
+        // Tool cards — file tools in streaming state render as thinking-mode
+        // (no card), others render as normal tool cards.
         (msg.toolExecutions || []).forEach((tool) => {
-          streamItems.push({
-            type: "tool", tool,
-            key: tool.id, time: tool.createdAt || 0,
-          });
+          const isFileTool =
+            tool.name === "write_file" || tool.name === "apply_patch" ||
+            (!tool.name && !!tool.contentDelta);
+          // During streaming: render as a thought-like panel, not a tool card
+          if (isFileTool && tool.status === "running" && msg.isStreaming && tool.contentDelta) {
+            streamItems.push({
+              type: "file-stream", tool,
+              key: tool.id, time: tool.createdAt || 0,
+            });
+          } else {
+            streamItems.push({
+              type: "tool", tool,
+              key: tool.id, time: tool.createdAt || 0,
+            });
+          }
         });
 
         streamItems.sort((a, b) => a.time - b.time);
@@ -393,8 +449,68 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
                       )}
                     </button>
                     {!isThoughtCollapsed && (
-                      <div className="mt-1.5 pl-3 border-l border-gray-200 dark:border-zinc-800/80 text-xs text-gray-500 dark:text-zinc-400 leading-relaxed font-sans space-y-1 py-0.5 whitespace-pre-wrap">
+                      <div className="mt-1.5 pl-3 border-l border-gray-200 dark:border-zinc-800/80 text-xs text-gray-500 dark:text-zinc-400 leading-relaxed font-sans space-y-1 py-0.5 whitespace-pre-wrap max-h-60 overflow-y-auto">
                         {item.tp.thoughtText}
+                      </div>
+                    )}
+                  </div>
+                );
+              }
+              if (item.type === "file-stream") {
+                // Streaming file content — renders exactly like thought panel.
+                // NO card, NO border background — pure thinking-mode style.
+                const isCollapsed = collapsedThoughts[item.key] ?? !msg.isStreaming;
+
+                // Extract file paths from the tool's original args (complete JSON,
+                // fast path) instead of re-parsing the growing contentDelta on every
+                // render — keeps streaming smooth.
+                const filePaths: string[] = (() => {
+                  if (!item.tool.args) return [];
+                  try {
+                    const obj = JSON.parse(item.tool.args);
+                    const list = obj.files || (obj.path ? [obj] : []);
+                    return list.map((f: any) => f.path || "").filter(Boolean);
+                  } catch {
+                    return [];
+                  }
+                })();
+                const rawContent = extractStreamContent(item.tool.contentDelta || "");
+
+                return (
+                  <div key={item.key} className="w-full text-xs transition-all font-sans">
+                    <button
+                      onClick={() => toggleThought(item.key)}
+                      className="flex items-center gap-1.5 text-xs text-gray-400 dark:text-zinc-500 hover:text-gray-600 dark:hover:text-zinc-300 cursor-pointer select-none py-0.5 transition-colors font-sans"
+                    >
+                      {isCollapsed ? (
+                        <ChevronRight className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500" />
+                      ) : (
+                        <ChevronDown className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500" />
+                      )}
+                      <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+                      <span className="font-sans text-xs tracking-tight">
+                        {t("正在生成文件内容...", "Generating file content...")}
+                      </span>
+                    </button>
+                    {!isCollapsed && (
+                      <div
+                        className="mt-1.5 pl-3 border-l border-gray-200 dark:border-zinc-800/80 text-xs text-gray-500 dark:text-zinc-400 leading-relaxed font-sans space-y-1 py-0.5 max-h-60 overflow-y-auto"
+                        ref={(el) => { if (el) el.scrollTop = el.scrollHeight; }}
+                      >
+                        {filePaths.length > 0 ? (
+                          filePaths.map((path, i) => (
+                            <div key={`${path}-${i}`}>
+                              <div className="font-semibold font-mono opacity-70">{path}</div>
+                              <pre className="font-mono opacity-80 whitespace-pre-wrap text-[11px]">
+                                {rawContent || "..."}
+                              </pre>
+                            </div>
+                          ))
+                        ) : (
+                          <pre className="font-mono break-all opacity-60 whitespace-pre-wrap text-[11px]">
+                            {rawContent || "..."}
+                          </pre>
+                        )}
                       </div>
                     )}
                   </div>
@@ -402,7 +518,10 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
               }
               if (item.type === "tool") {
                 const isFileTool =
-                  item.tool.name === "write_file" || item.tool.name === "apply_patch";
+                  item.tool.name === "write_file" || item.tool.name === "apply_patch" ||
+                  // Placeholder created by command_execution_output_delta before
+                  // item_started: no name yet, but contentDelta indicates a file tool.
+                  (!item.tool.name && !!item.tool.contentDelta);
                 // Always use FileChangeCard for file-editing tools — it handles
                 // all states internally (pending / running / completed / error).
                 if (isFileTool) {

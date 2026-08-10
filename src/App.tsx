@@ -304,6 +304,13 @@ export default function App() {
   const [openTabs, setOpenTabs] = useState<OpenTab[]>([]);
   const [activeTabPath, setActiveTabPath] = useState<string | null>(null);
 
+  // Clear editor tabs when switching projects — files belong to the project,
+  // not to individual conversations.
+  useEffect(() => {
+    setOpenTabs([]);
+    setActiveTabPath(null);
+  }, [activeProjectId]);
+
   // Active chat state
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
@@ -1094,6 +1101,11 @@ export default function App() {
         const toolName = data.toolName || data.tool_name || "";
         const args = data.arguments || {};
         const execCmd = args.command || args.path || args.query || args.pattern || toolName;
+
+        // All tools (including file tools) go through the normal approval flow.
+        // During streaming the file content was shown in thinking-mode style;
+        // now that arguments are complete, switch the tool card to "pending"
+        // so the user can review the diff before deciding.
         setPendingApprovals((prev) => ({
           ...prev,
           [approvalId]: { approvalId, toolName, arguments: args },
@@ -1724,6 +1736,7 @@ export default function App() {
                     onCloseEditor={() => setOpenTabs([])}
                     onKeepFile={handleKeepFile}
                     onRevertFile={handleRevertFile}
+                    projectId={activeProjectId}
                   />
                 </motion.div>
               )}
