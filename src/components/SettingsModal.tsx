@@ -3,6 +3,13 @@ import { motion, AnimatePresence } from "motion/react";
 import { useSettings } from "../context/SettingsContext";
 import { useToast } from "../context/ToastContext";
 import { ServerAddressSelector } from "./ServerAddressSelector";
+import { getSkillMarket, installSkill, uninstallSkill, MarketSkill } from "../lib/skillApi";
+import {
+  getSearchSettings,
+  saveSearchSettings,
+  testSearchSettings,
+  SearchBackendKind,
+} from "../lib/searchSettingsApi";
 import {
   Settings,
   Bot,
@@ -68,6 +75,7 @@ export type SettingsCategory =
   | "memory"
   | "commands"
   | "models"
+  | "web_search"
   | "code_index"
   | "logs"
   | "extensions"
@@ -442,7 +450,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     testModelConnection,
   } = useSettings();
 
-  const { showSuccess, showError, showInfo } = useToast();
+  const { showSuccess, showError, showInfo, showWarning } = useToast();
 
   const [activeCategory, setActiveCategory] = useState<SettingsCategory>(initialCategory);
   const [searchQuery, setSearchQuery] = useState("");
@@ -494,11 +502,151 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [isAddCustomModalOpen, setIsAddCustomModalOpen] = useState(false);
   const [editingModelId, setEditingModelId] = useState<string | null>(null);
 
+  // Skill market (loaded from the backend, per-user install state)
+  const [marketSkills, setMarketSkills] = useState<MarketSkill[]>([]);
+  const [installingSkillId, setInstallingSkillId] = useState<string | null>(null);
+
+  // Web search settings (联网搜索) — per-user, backend-persisted
+  const [wsBackend, setWsBackend] = useState<SearchBackendKind>("tavily");
+  const [wsTavilyKey, setWsTavilyKey] = useState("");
+  const [wsBraveKey, setWsBraveKey] = useState("");
+  const [wsBaseUrl, setWsBaseUrl] = useState("");
+  const [wsShowKey, setWsShowKey] = useState(false);
+  const [isWsBackendOpen, setIsWsBackendOpen] = useState(false);
+  const [wsSaving, setWsSaving] = useState(false);
+  const [wsTesting, setWsTesting] = useState(false);
+  const [wsLoaded, setWsLoaded] = useState(false);
+  const [wsHasSavedTavilyKey, setWsHasSavedTavilyKey] = useState(false);
+  const [wsHasSavedBraveKey, setWsHasSavedBraveKey] = useState(false);
+
   useEffect(() => {
     if (isOpen) {
       refreshModels();
     }
   }, [isOpen, activeCategory]);
+
+  // Load web-search settings when the page is first opened
+  useEffect(() => {
+    if (!isOpen || activeCategory !== "web_search" || wsLoaded) return;
+    const load = async () => {
+      if (user?.token) {
+        try {
+          const baseUrl = backendApiUrl || localStorage.getItem("app_backend_api_url") || "https://agent.hery.cloud";
+          const s = await getSearchSettings(baseUrl, user.token);
+          setWsBackend(s.backend === "brave" ? "brave" : "tavily");
+          setWsTavilyKey(s.tavilyApiKey); // mask sentinel or ""
+          setWsBraveKey(s.braveApiKey);
+          setWsBaseUrl(s.baseUrl);
+          setWsHasSavedTavilyKey(s.hasTavilyKey);
+          setWsHasSavedBraveKey(s.hasBraveKey);
+        } catch (err: any) {
+          console.warn("Failed to load web search settings:", err);
+          showError(t("加载失败", "Load Failed"), err?.message || String(err));
+        }
+      } else {
+        try {
+          const raw = localStorage.getItem("app_web_search_settings");
+          if (raw) {
+            const s = JSON.parse(raw);
+            setWsBackend(s.backend === "brave" ? "brave" : "tavily");
+            setWsTavilyKey(s.tavily_api_key || "");
+            setWsBraveKey(s.brave_api_key || "");
+            setWsBaseUrl(s.base_url || "");
+            setWsHasSavedTavilyKey(Boolean(s.tavily_api_key));
+            setWsHasSavedBraveKey(Boolean(s.brave_api_key));
+          }
+        } catch {
+          /* ignore malformed local settings */
+        }
+      }
+      setWsLoaded(true);
+    };
+    load();
+  }, [isOpen, activeCategory, wsLoaded, user?.token, backendApiUrl]);
+
+  const handleSaveSearchSettings = async () => {
+    if (wsSaving) return;
+    const keyForBackend =
+      wsBackend === "tavily"
+        ? wsTavilyKey.trim() || (wsHasSavedTavilyKey ? "saved" : "")
+        : wsBraveKey.trim() || (wsHasSavedBraveKey ? "saved" : "");
+    if (!keyForBackend) {
+      const errMsg = t(
+        "请填写所选后端的 API Key，或切换到已配置密钥的后端",
+        "Please enter the API key for the selected backend"
+      );
+      showError(t("保存失败", "Save Failed"), errMsg);
+      return;
+    }
+    setWsSaving(true);
+    try {
+      // Sentinel / empty = keep stored key (server contract)
+      const body = {
+        backend: wsBackend,
+        tavily_api_key: wsTavilyKey === "••••••••" ? "" : wsTavilyKey.trim(),
+        brave_api_key: wsBraveKey === "••••••••" ? "" : wsBraveKey.trim(),
+        base_url: wsBaseUrl.trim(),
+      };
+      if (user?.token) {
+        const baseUrl = backendApiUrl || localStorage.getItem("app_backend_api_url") || "https://agent.hery.cloud";
+        const s = await saveSearchSettings(baseUrl, user.token, body);
+        setWsTavilyKey(s.tavilyApiKey);
+        setWsBraveKey(s.braveApiKey);
+        setWsHasSavedTavilyKey(s.hasTavilyKey);
+        setWsHasSavedBraveKey(s.hasBraveKey);
+        showSuccess(
+          t("联网搜索配置已保存", "Web Search Settings Saved"),
+          t("Agent 的 web_search 工具将使用此配置", "The web_search tool will use this configuration")
+        );
+      } else {
+        localStorage.setItem(
+          "app_web_search_settings",
+          JSON.stringify({ ...body, updated_at: new Date().toISOString() })
+        );
+        setWsHasSavedTavilyKey(Boolean(body.tavily_api_key) || wsHasSavedTavilyKey);
+        setWsHasSavedBraveKey(Boolean(body.brave_api_key) || wsHasSavedBraveKey);
+        showSuccess(
+          t("已在本地保存", "Saved Locally"),
+          t("登录后可同步到服务端供 Agent 使用", "Log in to sync to the server for the agent")
+        );
+      }
+    } catch (err: any) {
+      showError(t("保存失败", "Save Failed"), err?.message || String(err));
+    } finally {
+      setWsSaving(false);
+    }
+  };
+
+  const handleTestSearchSettings = async () => {
+    if (wsTesting) return;
+    if (!user?.token) {
+      showWarning(t("请先登录", "Log In First"), t("连通性测试需要登录（会消耗一次搜索额度）", "Testing requires login (consumes one search credit)"));
+      return;
+    }
+    setWsTesting(true);
+    try {
+      const baseUrl = backendApiUrl || localStorage.getItem("app_backend_api_url") || "https://agent.hery.cloud";
+      const res = await testSearchSettings(baseUrl, user.token, {
+        backend: wsBackend,
+        // Untouched (sentinel/empty) fields fall back to the saved key server-side
+        tavily_api_key: wsTavilyKey === "••••••••" ? "" : wsTavilyKey.trim(),
+        brave_api_key: wsBraveKey === "••••••••" ? "" : wsBraveKey.trim(),
+        base_url: wsBaseUrl.trim(),
+      });
+      if (res.success) {
+        showSuccess(
+          t("连通性测试成功", "Connection Test Passed"),
+          res.message + (res.latency_ms ? ` (${Math.round(res.latency_ms)}ms)` : "")
+        );
+      } else {
+        showError(t("连通性测试失败", "Connection Test Failed"), res.message);
+      }
+    } catch (err: any) {
+      showError(t("连通性测试失败", "Connection Test Failed"), err?.message || String(err));
+    } finally {
+      setWsTesting(false);
+    }
+  };
 
   const handleRefresh = () => {
     setIsRefreshing(true);
@@ -637,6 +785,42 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     });
   };
 
+  const loadMarketSkills = async () => {
+    const baseUrl = backendApiUrl || "https://agent.hery.cloud";
+    const token = user?.token || "";
+    if (!token) return;
+    try {
+      const list = await getSkillMarket(baseUrl, token);
+      setMarketSkills(list);
+    } catch {
+      // Keep last known list; background load failures are non-fatal.
+    }
+  };
+
+  const handleInstallToggle = async (skill: MarketSkill) => {
+    const baseUrl = backendApiUrl || "https://agent.hery.cloud";
+    const token = user?.token || "";
+    if (!token) {
+      showError(t("未登录", "Not logged in"), t("请先登录后再安装技能", "Please log in to install skills"));
+      return;
+    }
+    setInstallingSkillId(skill.id);
+    try {
+      if (skill.installed) {
+        await uninstallSkill(baseUrl, token, skill.id);
+        showSuccess(t("技能已卸载", "Skill Uninstalled"), t(`已卸载 ${skill.name || skill.id}`, `Uninstalled ${skill.name || skill.id}`));
+      } else {
+        await installSkill(baseUrl, token, skill.id);
+        showSuccess(t("技能已安装", "Skill Installed"), t(`已安装 ${skill.name || skill.id}`, `Installed ${skill.name || skill.id}`));
+      }
+      await loadMarketSkills();
+    } catch (err: any) {
+      showError(t("操作失败", "Operation Failed"), err?.message || t("技能操作失败，请稍后重试", "Skill operation failed, please retry"));
+    } finally {
+      setInstallingSkillId(null);
+    }
+  };
+
   const isExtensionCategory =
     activeCategory === "extensions" ||
     activeCategory === "plugins" ||
@@ -648,6 +832,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     activeCategory === "extensions"
       ? "skills"
       : (activeCategory as "plugins" | "skills" | "mcp" | "sub_agents");
+
+  useEffect(() => {
+    if (isOpen && currentExtensionTab === "skills") {
+      loadMarketSkills();
+    }
+  }, [isOpen, currentExtensionTab]);
 
   useEffect(() => {
     if (isOpen && initialCategory) {
@@ -677,6 +867,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     { id: "memory", label: t("记忆", "Memory"), icon: BookOpen },
     { id: "commands", label: t("命令", "Commands"), icon: Terminal },
     { id: "models", label: t("模型", "Models"), icon: Boxes },
+    { id: "web_search", label: t("联网搜索", "Web Search"), icon: Globe },
     { id: "code_index", label: t("代码索引", "Code Index"), icon: Database },
     { id: "logs", label: t("日志", "Logs"), icon: Cloud },
   ];
@@ -996,13 +1187,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   {/* Skills tab */}
                   {currentExtensionTab === "skills" && (
                     <div className="space-y-2.5">
-                      {SKILLS_DATA.filter((item) => {
+                      {marketSkills.filter((item) => {
                         const matchQuery =
                           item.name.toLowerCase().includes(extensionSearchQuery.toLowerCase()) ||
-                          item.badge.toLowerCase().includes(extensionSearchQuery.toLowerCase()) ||
+                          item.enName.toLowerCase().includes(extensionSearchQuery.toLowerCase()) ||
+                          item.category.toLowerCase().includes(extensionSearchQuery.toLowerCase()) ||
                           item.description.toLowerCase().includes(extensionSearchQuery.toLowerCase());
                         if (extensionSubTab === "installed") {
-                          return matchQuery && installedItems[item.id];
+                          return matchQuery && item.installed;
                         }
                         return matchQuery;
                       }).map((skill) => (
@@ -1015,24 +1207,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                               <div
                                 className="w-7 h-7 rounded-full bg-gray-100 dark:bg-zinc-800 text-gray-600 dark:text-zinc-300 font-bold text-xs flex items-center justify-center shrink-0"
                               >
-                                {skill.letter}
+                                {(skill.enName || skill.name).charAt(0).toUpperCase()}
                               </div>
                               <div className="font-semibold text-xs text-gray-900 dark:text-zinc-100 truncate font-mono">
-                                {skill.name}
+                                {skill.id}
                               </div>
                               <span className="px-1.5 py-0.5 rounded text-[10px] bg-gray-100 dark:bg-zinc-800/80 text-gray-500 dark:text-zinc-400 border border-gray-200/70 dark:border-zinc-700/60 shrink-0 font-sans">
-                                {skill.badge}
+                                {skill.category}
                               </span>
                             </div>
                             <button
-                              onClick={() => toggleInstall(skill.id)}
-                              className={`px-3 py-1 rounded text-xs font-medium transition-all shrink-0 cursor-pointer ${
-                                installedItems[skill.id]
+                              onClick={() => handleInstallToggle(skill)}
+                              disabled={installingSkillId === skill.id}
+                              className={`px-3 py-1 rounded text-xs font-medium transition-all shrink-0 cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed ${
+                                skill.installed
                                   ? "bg-gray-100 dark:bg-zinc-800 text-gray-500 dark:text-zinc-400"
                                   : "border border-gray-300 dark:border-zinc-700 text-gray-700 dark:text-zinc-300 hover:bg-gray-50 dark:hover:bg-zinc-850"
                               }`}
                             >
-                              {installedItems[skill.id] ? t("已安装", "Installed") : t("安装", "Install")}
+                              {skill.installed ? t("已安装", "Installed") : t("安装", "Install")}
                             </button>
                           </div>
                           <p className="text-xs text-gray-500 dark:text-zinc-400 line-clamp-2 leading-relaxed">
@@ -1040,6 +1233,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                           </p>
                         </div>
                       ))}
+                      {marketSkills.length === 0 && (
+                        <div className="py-6 text-center text-xs text-gray-400 dark:text-zinc-500">
+                          {t("未获取到技能市场数据", "No skill market data")}
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -2012,6 +2210,189 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       });
                     })()}
                     </AnimatePresence>
+                  </div>
+                </div>
+              )}
+
+              {/* CATEGORY: 联网搜索 */}
+              {activeCategory === "web_search" && (
+                <div className="space-y-4 text-xs text-gray-700 dark:text-zinc-300">
+                  <div className="p-4 bg-[#f8f9fa] dark:bg-zinc-900/60 border border-gray-200/90 dark:border-zinc-800 rounded-md shadow-2xs">
+                    <div className="font-bold text-gray-900 dark:text-zinc-100 text-xs">
+                      {t("联网搜索 (web_search)", "Web Search (web_search)")}
+                    </div>
+                    <div className="text-gray-400 dark:text-zinc-500 text-[11px] mt-0.5 leading-relaxed">
+                      {t(
+                        "Agent 的 web_search 工具将使用以下配置进行联网搜索。个人配置优先于服务端全局配置，修改后下一次搜索立即生效。",
+                        "The agent's web_search tool uses this configuration. Personal settings take precedence over the server's global config and apply from the next search."
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="p-4 border border-gray-200/90 dark:border-zinc-800 rounded-md bg-[#f8f9fa] dark:bg-zinc-900/60 space-y-4 shadow-2xs">
+                    {/* Backend dropdown */}
+                    <div className="space-y-1 relative">
+                      <label className="block text-xs font-bold text-gray-900 dark:text-zinc-100">{t("搜索后端", "Search Backend")}</label>
+                      <p className="text-gray-400 dark:text-zinc-500 text-[11px]">
+                        {wsBackend === "tavily"
+                          ? t("免费额度 1000 次/月，注册 tavily.com 获取 Key", "Free tier: 1000 credits/month — get a key at tavily.com")
+                          : t("免费额度 2000 次/月，注册 brave.com 获取 Key", "Free tier: 2000 queries/month — get a key at brave.com")}
+                      </p>
+
+                      <div className="relative max-w-xs mt-1">
+                        <button
+                          type="button"
+                          onClick={() => setIsWsBackendOpen(!isWsBackendOpen)}
+                          className="w-full bg-white dark:bg-zinc-800 border border-gray-200/90 dark:border-zinc-700 rounded-md px-3 py-1.5 text-xs text-gray-800 dark:text-zinc-100 flex items-center justify-between hover:border-gray-300 dark:hover:border-zinc-600 focus:outline-none focus:border-gray-400 dark:focus:border-zinc-500 transition-all cursor-pointer shadow-2xs"
+                        >
+                          <span className="font-medium text-xs text-gray-900 dark:text-zinc-100">
+                            {wsBackend === "tavily" ? "Tavily" : "Brave"}
+                          </span>
+                          <ChevronDown className={`w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 transition-transform duration-150 ${isWsBackendOpen ? "rotate-180 text-gray-700 dark:text-zinc-200" : ""}`} />
+                        </button>
+
+                        <AnimatePresence>
+                          {isWsBackendOpen && (
+                            <>
+                              <div
+                                className="fixed inset-0 z-10"
+                                onClick={() => setIsWsBackendOpen(false)}
+                              />
+                              <motion.div
+                                initial={{ opacity: 0, y: -6, scale: 0.96 }}
+                                animate={{ opacity: 1, y: 0, scale: 1 }}
+                                exit={{ opacity: 0, y: -6, scale: 0.96 }}
+                                transition={{ duration: 0.15, ease: "easeOut" }}
+                                className="absolute left-0 right-0 top-full mt-1 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 rounded-lg shadow-lg z-20 py-1 overflow-hidden"
+                              >
+                                {[
+                                  { id: "tavily" as const, name: "Tavily", desc: t("免费额度 1000 次/月", "Free tier: 1000 credits/month") },
+                                  { id: "brave" as const, name: "Brave", desc: t("免费额度 2000 次/月", "Free tier: 2000 queries/month") },
+                                ].map((item) => {
+                                  const isSelected = wsBackend === item.id;
+                                  return (
+                                    <button
+                                      key={item.id}
+                                      type="button"
+                                      onClick={() => {
+                                        setWsBackend(item.id);
+                                        setIsWsBackendOpen(false);
+                                      }}
+                                      className={`w-full text-left px-3 py-2 text-xs flex items-start justify-between gap-2 transition-colors cursor-pointer ${
+                                        isSelected
+                                          ? "bg-gray-50 dark:bg-zinc-700 text-gray-900 dark:text-zinc-100 font-semibold"
+                                          : "text-gray-700 dark:text-zinc-300 hover:bg-gray-50/80 dark:hover:bg-zinc-750"
+                                      }`}
+                                    >
+                                      <span>
+                                        <span className="block font-medium text-xs">{item.name}</span>
+                                        <span className="block text-[10px] font-normal text-gray-400 dark:text-zinc-500">{item.desc}</span>
+                                      </span>
+                                      {isSelected && <Check className="w-3.5 h-3.5 text-gray-900 dark:text-zinc-100 shrink-0 mt-0.5" />}
+                                    </button>
+                                  );
+                                })}
+                              </motion.div>
+                            </>
+                          )}
+                        </AnimatePresence>
+                      </div>
+                    </div>
+
+                    {/* API key for the selected backend */}
+                    <div className="pt-3 border-t border-gray-200/70 dark:border-zinc-800 space-y-1">
+                      <label className="block text-xs font-bold text-gray-900 dark:text-zinc-100">
+                        {wsBackend === "tavily" ? "Tavily API Key" : "Brave API Key"}
+                      </label>
+                      <p className="text-gray-400 dark:text-zinc-500 text-[11px]">
+                        {(wsBackend === "tavily" ? wsTavilyKey : wsBraveKey) === "••••••••"
+                          ? t("已保存（显示为掩码，留空提交不会覆盖）", "Saved (shown masked — submitting it unchanged keeps the stored key)")
+                          : t("服务端加密存储，不会以明文回显", "Encrypted at rest; never echoed back in plaintext")}
+                      </p>
+                      <div className="relative">
+                        <input
+                          type={wsShowKey ? "text" : "password"}
+                          value={wsBackend === "tavily" ? wsTavilyKey : wsBraveKey}
+                          onChange={(e) =>
+                            wsBackend === "tavily"
+                              ? setWsTavilyKey(e.target.value)
+                              : setWsBraveKey(e.target.value)
+                          }
+                          placeholder={wsBackend === "tavily" ? "tvly-..." : "BSA..."}
+                          className="w-full bg-white dark:bg-zinc-800 border border-gray-200/90 dark:border-zinc-700 rounded-md px-3 py-1.5 text-xs font-mono text-gray-900 dark:text-zinc-100 placeholder-gray-400 dark:placeholder-zinc-500 focus:outline-none focus:border-gray-400 dark:focus:border-zinc-500 transition-all pr-9 shadow-2xs"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setWsShowKey(!wsShowKey)}
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-zinc-300 cursor-pointer"
+                          title={wsShowKey ? t("隐藏", "Hide") : t("显示", "Show")}
+                        >
+                          {wsShowKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Optional base URL override */}
+                    <div className="pt-3 border-t border-gray-200/70 dark:border-zinc-800 space-y-1">
+                      <label className="block text-xs font-bold text-gray-900 dark:text-zinc-100">
+                        {t("接口地址（高级，可选）", "Endpoint URL (advanced, optional)")}
+                      </label>
+                      <p className="text-gray-400 dark:text-zinc-500 text-[11px]">
+                        {t("留空使用默认官方地址", "Leave empty to use the default official endpoint")}
+                      </p>
+                      <input
+                        type="text"
+                        value={wsBaseUrl}
+                        onChange={(e) => setWsBaseUrl(e.target.value)}
+                        placeholder={
+                          wsBackend === "tavily"
+                            ? "https://api.tavily.com/search"
+                            : "https://api.search.brave.com/res/v1/web/search"
+                        }
+                        className="w-full bg-white dark:bg-zinc-800 border border-gray-200/90 dark:border-zinc-700 rounded-md px-3 py-1.5 text-xs font-mono text-gray-900 dark:text-zinc-100 placeholder-gray-400 dark:placeholder-zinc-500 focus:outline-none focus:border-gray-400 dark:focus:border-zinc-500 transition-all shadow-2xs"
+                      />
+                    </div>
+
+                    {/* Actions */}
+                    <div className="pt-3 border-t border-gray-200/70 dark:border-zinc-800 space-y-2">
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={handleSaveSearchSettings}
+                          disabled={wsSaving}
+                          className={`flex-1 px-3.5 py-1.5 rounded-md text-xs font-medium transition-all shadow-2xs ${
+                            wsSaving
+                              ? "opacity-60 cursor-not-allowed bg-gray-900 dark:bg-zinc-100 text-white dark:text-zinc-900"
+                              : "bg-gray-900 dark:bg-zinc-100 text-white dark:text-zinc-900 hover:bg-gray-800 dark:hover:bg-zinc-200 cursor-pointer"
+                          }`}
+                        >
+                          {wsSaving ? t("保存中…", "Saving…") : t("保存配置", "Save Settings")}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleTestSearchSettings}
+                          disabled={wsTesting || !user?.token}
+                          title={!user?.token ? t("登录后可测试", "Log in to test") : undefined}
+                          className={`flex-1 px-3.5 py-1.5 rounded-md text-xs font-medium transition-all border shadow-2xs flex items-center justify-center gap-1.5 ${
+                            wsTesting || !user?.token
+                              ? "opacity-60 cursor-not-allowed bg-gray-100 dark:bg-zinc-800 border-gray-200 dark:border-zinc-700 text-gray-500 dark:text-zinc-400"
+                              : "bg-white dark:bg-zinc-800 hover:bg-gray-50 dark:hover:bg-zinc-750 text-gray-800 dark:text-zinc-200 border-gray-200/90 dark:border-zinc-700 cursor-pointer"
+                          }`}
+                        >
+                          {wsTesting ? (
+                            <>
+                              <Activity className="w-3.5 h-3.5 animate-spin" />
+                              {t("测试中…", "Testing…")}
+                            </>
+                          ) : (
+                            t("测试连接", "Test Connection")
+                          )}
+                        </button>
+                      </div>
+                      <div className="text-gray-400 dark:text-zinc-500 text-[11px]">
+                        {t("测试会执行一次真实搜索（消耗 1 次额度）", "Testing runs one real search (consumes 1 credit)")}
+                      </div>
+                    </div>
                   </div>
                 </div>
               )}

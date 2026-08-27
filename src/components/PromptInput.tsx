@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { useSettings } from "../context/SettingsContext";
+import { useToast } from "../context/ToastContext";
 import { motion, AnimatePresence } from "motion/react";
 import {
   Mic,
@@ -7,10 +8,7 @@ import {
   Plus,
   ChevronDown,
   X,
-  Smartphone,
-  CheckCircle2,
   FolderArchive,
-  Terminal,
   Target,
   FileText,
   Compass,
@@ -18,40 +16,53 @@ import {
   Figma,
   Image as ImageIcon,
   Wrench,
+  Loader2,
+  Check,
 } from "lucide-react";
 import { ContextPill, CommandItem } from "../types";
-import { PlusMenu, ModeMenu, ModelMenu } from "./ContextPopovers";
-import { SKILLS_LIST, RECOMMENDATION_CARDS } from "../data/mockData";
+import { PlusMenu, ModelMenu } from "./ContextPopovers";
+import { RECOMMENDATION_CARDS } from "../data/mockData";
+import { getUserSkills, UserSkill } from "../lib/skillApi";
 
 interface PromptInputProps {
-  onSend: (text: string, pills: ContextPill[], mode: string, model: string) => void;
+  onSend: (text: string, pills: ContextPill[], mode: string, model: string, images?: string[]) => void;
   projectName: string;
   branchName: string;
   selectedModel?: string;
   onModelChange?: (model: string) => void;
-  selectedMode?: string;
-  onModeChange?: (mode: string) => void;
   onSelectRecommendation?: (promptText: string) => void;
   isGenerating?: boolean;
   onStop?: () => void;
+  /** Upload a real file attachment into the thread workspace (agent-readable).
+   *  Returns the attachment descriptor, or null when upload isn't possible
+   *  (not logged in / no thread yet). Provided by App. */
+  onUploadAttachment?: (file: File) => Promise<ContextPill["attachment"] | null>;
 }
 
 export const PromptInput: React.FC<PromptInputProps> = ({
   onSend,
   projectName,
-  branchName,
   selectedModel: propModel,
   onModelChange,
-  selectedMode: propMode,
-  onModeChange,
   onSelectRecommendation,
   isGenerating = false,
   onStop,
+  onUploadAttachment,
 }) => {
-  const { t, defaultModel, agentThinking, backendModels } = useSettings();
+  const { t, defaultModel, agentThinking, backendModels, backendApiUrl, user } = useSettings();
+  const { showError } = useToast();
   const [inputText, setInputText] = useState("");
   const [contextPills, setContextPills] = useState<ContextPill[]>([]);
-  const [localMode, setLocalMode] = useState(t("自动接受编辑", "Auto Accept Edits"));
+
+  // Pending image attachments — read as data URLs locally (thumbnail shows
+  // immediately); the actual upload happens on send via sendMessage.
+  const [pendingImages, setPendingImages] = useState<
+    { id: string; name: string; dataUrl: string }[]
+  >([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  // Real file attachments — uploading flag per filename for the pill spinner
+  const [uploadingFiles, setUploadingFiles] = useState<Set<string>>(new Set());
   const [localModel, setLocalModel] = useState(() => {
     // Resolve initial value: use first enabled model from the list if available
     const enabled = (backendModels || []).filter((m) => m.isEnabled !== false);
@@ -61,17 +72,12 @@ export const PromptInput: React.FC<PromptInputProps> = ({
   const selectedModel = propModel !== undefined ? propModel : localModel;
   const setSelectedModel = onModelChange || setLocalModel;
 
-  const selectedMode = propMode !== undefined ? propMode : localMode;
-  const setSelectedMode = onModeChange || setLocalMode;
-
-  const [selectedBranch, setSelectedBranch] = useState(branchName);
 
   // Popover toggle states
   const [showPlusMenu, setShowPlusMenu] = useState(false);
-  const [showModeMenu, setShowModeMenu] = useState(false);
   const [showModelMenu, setShowModelMenu] = useState(false);
-  const [showBranchMenu, setShowBranchMenu] = useState(false);
   const [isListening, setIsListening] = useState(false);
+  const [skills, setSkills] = useState<UserSkill[]>([]);
 
   // Autocomplete popup states
   const [showMentionMenu, setShowMentionMenu] = useState(false);
@@ -82,8 +88,6 @@ export const PromptInput: React.FC<PromptInputProps> = ({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const plusMenuRef = useRef<HTMLDivElement>(null);
   const modelMenuRef = useRef<HTMLDivElement>(null);
-  const modeMenuRef = useRef<HTMLDivElement>(null);
-  const branchMenuRef = useRef<HTMLDivElement>(null);
 
   // Click outside handlers for popovers
   useEffect(() => {
@@ -94,12 +98,6 @@ export const PromptInput: React.FC<PromptInputProps> = ({
       }
       if (modelMenuRef.current && !modelMenuRef.current.contains(target)) {
         setShowModelMenu(false);
-      }
-      if (modeMenuRef.current && !modeMenuRef.current.contains(target)) {
-        setShowModeMenu(false);
-      }
-      if (branchMenuRef.current && !branchMenuRef.current.contains(target)) {
-        setShowBranchMenu(false);
       }
     };
 
@@ -119,6 +117,16 @@ export const PromptInput: React.FC<PromptInputProps> = ({
       )}px`;
     }
   }, [inputText]);
+
+  // Load installed user-level skills for the / command autocomplete.
+  useEffect(() => {
+    const baseUrl = backendApiUrl || "https://agent.hery.cloud";
+    const token = user?.token || "";
+    if (!token) return;
+    getUserSkills(baseUrl, token)
+      .then(setSkills)
+      .catch(() => {});
+  }, [backendApiUrl, user?.token]);
 
   const getPillIcon = (type: string) => {
     switch (type) {
@@ -198,11 +206,145 @@ export const PromptInput: React.FC<PromptInputProps> = ({
     }
   };
 
+  // Image attachment limits (mirror the backend SendMessageRequest contract)
+  const MAX_IMAGES = 9;
+  const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+  const IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp"]);
+
+  // Image attachments — data URLs read locally (thumbnail shows immediately),
+  // uploaded server-side on send via sendMessage.
+  const handleImagesSelected = (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const room = MAX_IMAGES - pendingImages.length;
+    const list = Array.from(files);
+    if (room <= 0 || list.length > room) {
+      showError(
+        t("图片数量已达上限", "Image Limit Reached"),
+        t(`单条消息最多 ${MAX_IMAGES} 张图片`, `Up to ${MAX_IMAGES} images per message`)
+      );
+    }
+    for (const file of list.slice(0, Math.max(room, 0))) {
+      if (!IMAGE_MIMES.has(file.type)) {
+        showError(
+          t("不支持的图片格式", "Unsupported Format"),
+          `${file.name}（支持 PNG/JPEG/GIF/WebP/BMP）`
+        );
+        continue;
+      }
+      if (file.size > MAX_IMAGE_BYTES) {
+        showError(t("图片过大", "Image Too Large"), `${file.name}（上限 10 MB）`);
+        continue;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = String(reader.result || "");
+        if (!dataUrl.startsWith("data:")) return;
+        setPendingImages((prev) => [
+          ...prev,
+          {
+            id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+            name: file.name,
+            dataUrl,
+          },
+        ]);
+      };
+      reader.readAsDataURL(file);
+    }
+    if (imageInputRef.current) imageInputRef.current.value = "";
+  };
+
+  // Real file attachment upload — lands in the thread workspace so the
+  // agent can read it. Falls back to the old decorative pill when the
+  // uploader isn't wired (not logged in / no thread).
+  const handleFilesSelected = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    for (const file of Array.from(files)) {
+      if (!onUploadAttachment) {
+        // No uploader: keep the legacy decorative pill so the user still
+        // sees the file mentioned in the message.
+        setContextPills((prev) =>
+          prev.some((p) => p.id === file.name)
+            ? prev
+            : [...prev, { id: file.name, name: file.name, type: "file" }]
+        );
+        continue;
+      }
+      setUploadingFiles((prev) => new Set(prev).add(file.name));
+      try {
+        const attachment = await onUploadAttachment(file);
+        if (attachment) {
+          setContextPills((prev) =>
+            prev.some((p) => p.id === file.name)
+              ? prev
+              : [
+                  ...prev,
+                  {
+                    id: file.name,
+                    name: file.name,
+                    type: "file",
+                    attachment,
+                  },
+                ]
+          );
+          // Image attachments are additionally pushed through the images
+          // channel (input_image parts), so vision-capable models see the
+          // picture directly instead of just a workspace path in the text.
+          if (IMAGE_MIMES.has(file.type)) {
+            if (file.size > MAX_IMAGE_BYTES) {
+              showError(
+                t("图片过大，仅按附件处理", "Image Too Large, Kept As Attachment Only"),
+                `${file.name}（上限 10 MB）`
+              );
+            } else {
+              const reader = new FileReader();
+              reader.onload = () => {
+                const dataUrl = String(reader.result || "");
+                if (!dataUrl.startsWith("data:")) return;
+                setPendingImages((prev) => {
+                  if (prev.length >= MAX_IMAGES || prev.some((p) => p.name === file.name)) return prev;
+                  return [
+                    ...prev,
+                    {
+                      id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+                      name: file.name,
+                      dataUrl,
+                    },
+                  ];
+                });
+              };
+              reader.readAsDataURL(file);
+            }
+          }
+        }
+      } catch (err: any) {
+        showError(t("文件上传失败", "Upload Failed"), `${file.name}: ${err?.message || err}`);
+      } finally {
+        setUploadingFiles((prev) => {
+          const next = new Set(prev);
+          next.delete(file.name);
+          return next;
+        });
+      }
+    }
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
   const handleSubmit = () => {
-    if (!inputText.trim() && contextPills.length === 0) return;
-    onSend(inputText, contextPills, selectedMode, selectedModel);
+    // While a turn is streaming the send button is swapped to a stop button,
+    // but the Enter key still lands here — block it so a generation in
+    // progress can't be double-submitted (the backend also rejects with 409).
+    if (isGenerating) return;
+    if (!inputText.trim() && contextPills.length === 0 && pendingImages.length === 0) return;
+    onSend(
+      inputText,
+      contextPills,
+      "",
+      selectedModel,
+      pendingImages.length > 0 ? pendingImages.map((img) => img.dataUrl) : undefined
+    );
     setInputText("");
     setContextPills([]);
+    setPendingImages([]);
   };
 
   const skillPills = contextPills.filter((p) => p.type === "skill");
@@ -275,6 +417,39 @@ export const PromptInput: React.FC<PromptInputProps> = ({
               </AnimatePresence>
             </div>
 
+            {/* Pending image attachments — thumbnails with remove on hover */}
+            {pendingImages.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                <AnimatePresence>
+                  {pendingImages.map((img) => (
+                    <motion.div
+                      layout
+                      key={img.id}
+                      initial={{ opacity: 0, scale: 0.9 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.9 }}
+                      transition={{ duration: 0.15, ease: "easeOut" }}
+                      className="relative group/img w-16 h-16 rounded-lg overflow-hidden border border-gray-200 dark:border-zinc-700 bg-gray-100 dark:bg-zinc-800 shadow-2xs"
+                      title={img.name}
+                    >
+                      <img src={img.dataUrl} alt={img.name} className="w-full h-full object-cover" />
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setPendingImages(pendingImages.filter((p) => p.id !== img.id));
+                        }}
+                        className="absolute top-0.5 right-0.5 p-0.5 rounded bg-black/60 text-white opacity-0 group-hover/img:opacity-100 transition-opacity cursor-pointer"
+                        title={t("移除", "Remove")}
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </motion.div>
+                  ))}
+                </AnimatePresence>
+              </div>
+            )}
+
             {/* Text Area (occupies full width) */}
             <textarea
               ref={textareaRef}
@@ -301,7 +476,6 @@ export const PromptInput: React.FC<PromptInputProps> = ({
                   type="button"
                   onClick={() => {
                     setShowPlusMenu(!showPlusMenu);
-                    setShowModeMenu(false);
                     setShowModelMenu(false);
                   }}
                   className="h-7 w-7 bg-gray-100/80 dark:bg-zinc-800 hover:bg-gray-200/80 dark:hover:bg-zinc-700 rounded-lg text-xs font-medium text-gray-700 dark:text-zinc-200 transition-colors cursor-pointer flex items-center justify-center"
@@ -323,15 +497,37 @@ export const PromptInput: React.FC<PromptInputProps> = ({
                           setContextPills([...contextPills, skillPill]);
                         }
                       }}
+                      onUploadImage={() => imageInputRef.current?.click()}
+                      onUploadFile={() => fileInputRef.current?.click()}
                       onClose={() => setShowPlusMenu(false)}
                     />
                   )}
                 </AnimatePresence>
-              </div>
 
+                {/* Hidden file attachment input — triggered from the + menu's 添加文件 */}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => handleFilesSelected(e.target.files)}
+                />
+
+                {/* Hidden image input — triggered from the + menu's 添加图片 */}
+                <input
+                  ref={imageInputRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/gif,image/webp,image/bmp"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => handleImagesSelected(e.target.files)}
+                />
+              </div>
               {/* Other context pills shown right after the + button with animation! */}
               <AnimatePresence>
-                {otherPills.map((pill) => (
+                {otherPills.map((pill) => {
+                  const uploading = uploadingFiles.has(pill.name);
+                  return (
                   <motion.span
                     layout
                     key={pill.id}
@@ -339,10 +535,18 @@ export const PromptInput: React.FC<PromptInputProps> = ({
                     animate={{ opacity: 1, scale: 1, y: 0 }}
                     exit={{ opacity: 0, scale: 0.9, y: 4 }}
                     transition={{ duration: 0.15, ease: "easeOut" }}
-                    className={`context-pill h-7 inline-flex items-center gap-1.5 px-2.5 border rounded-lg text-xs font-medium shadow-2xs ${getPillStyle(pill.type)}`}
+                    className={`context-pill h-7 inline-flex items-center gap-1.5 px-2.5 border rounded-lg text-xs font-medium shadow-2xs ${getPillStyle(pill.type)} ${uploading ? "opacity-60" : ""}`}
+                    title={pill.attachment ? pill.attachment.workspacePath : undefined}
                   >
-                    {getPillIcon(pill.type)}
+                    {uploading ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      getPillIcon(pill.type)
+                    )}
                     <span>{pill.name}</span>
+                    {pill.attachment && !uploading && (
+                      <Check className="w-3 h-3 opacity-60" />
+                    )}
                     <button
                       type="button"
                       onClick={(e) => {
@@ -354,7 +558,8 @@ export const PromptInput: React.FC<PromptInputProps> = ({
                       <X className="w-3 h-3" />
                     </button>
                   </motion.span>
-                ))}
+                  );
+                })}
               </AnimatePresence>
 
               {/* Standalone Auto Model Switcher Button */}
@@ -364,7 +569,6 @@ export const PromptInput: React.FC<PromptInputProps> = ({
                   onClick={() => {
                     setShowModelMenu(!showModelMenu);
                     setShowPlusMenu(false);
-                    setShowModeMenu(false);
                   }}
                   className="h-7 flex items-center gap-1 px-2.5 bg-gray-100/80 dark:bg-zinc-800 hover:bg-gray-200/80 dark:hover:bg-zinc-700 rounded-lg text-xs font-medium text-gray-700 dark:text-zinc-200 transition-colors cursor-pointer"
                   title={t("切换模型", "Switch Model")}
@@ -379,33 +583,6 @@ export const PromptInput: React.FC<PromptInputProps> = ({
                       currentModel={selectedModel}
                       onSelectModel={(m) => setSelectedModel(m)}
                       onClose={() => setShowModelMenu(false)}
-                    />
-                  )}
-                </AnimatePresence>
-              </div>
-
-              {/* Mode Dropdown (e.g., 自动接受编辑) */}
-              <div className="relative" ref={modeMenuRef}>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowModeMenu(!showModeMenu);
-                    setShowPlusMenu(false);
-                    setShowModelMenu(false);
-                  }}
-                  className="h-7 flex items-center gap-1 px-2.5 bg-gray-100/80 dark:bg-zinc-800 hover:bg-gray-200/80 dark:hover:bg-zinc-700 rounded-lg text-xs font-medium text-gray-700 dark:text-zinc-200 transition-colors cursor-pointer"
-                >
-                  <CheckCircle2 className="w-3.5 h-3.5 text-blue-500 dark:text-blue-400" />
-                  <span>{selectedMode}</span>
-                  <ChevronDown className="w-3 h-3 text-gray-400 dark:text-zinc-500" />
-                </button>
-
-                <AnimatePresence>
-                  {showModeMenu && (
-                    <ModeMenu
-                      currentMode={selectedMode}
-                      onSelectMode={(m) => setSelectedMode(m)}
-                      onClose={() => setShowModeMenu(false)}
                     />
                   )}
                 </AnimatePresence>
@@ -464,9 +641,9 @@ export const PromptInput: React.FC<PromptInputProps> = ({
               ) : (
                 <button
                   onClick={handleSubmit}
-                  disabled={!inputText.trim() && contextPills.length === 0}
+                  disabled={!inputText.trim() && contextPills.length === 0 && pendingImages.length === 0}
                   className={`w-8 h-8 flex items-center justify-center rounded-lg transition-all shrink-0 border ${
-                    inputText.trim() || contextPills.length > 0
+                    inputText.trim() || contextPills.length > 0 || pendingImages.length > 0
                       ? "bg-white text-black border-gray-300 dark:bg-zinc-900 dark:text-white dark:border-zinc-700 hover:bg-gray-50 dark:hover:bg-zinc-800 shadow-xs cursor-pointer active:scale-95"
                       : "bg-white/80 text-gray-300 border-gray-200 dark:bg-zinc-900/50 dark:text-zinc-600 dark:border-zinc-800 cursor-not-allowed"
                   }`}
@@ -476,66 +653,6 @@ export const PromptInput: React.FC<PromptInputProps> = ({
                 </button>
               )}
             </div>
-          </div>
-        </div>
-
-        {/* Sub Status Bar */}
-        <div className="px-4 py-2 bg-gray-50/90 dark:bg-zinc-900/90 border-t border-gray-100 dark:border-zinc-800 rounded-b-xl flex items-center justify-between text-[11px] text-gray-500 dark:text-zinc-400 select-none">
-          {/* Left Sub Items */}
-          <div className="flex items-center gap-3">
-            <button className="flex items-center gap-1 hover:text-gray-800 dark:hover:text-zinc-200 transition-colors">
-              <Terminal className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500" />
-              <span>Local</span>
-              <ChevronDown className="w-3 h-3 text-gray-400 dark:text-zinc-500" />
-            </button>
-            <span className="text-gray-300 dark:text-zinc-700">|</span>
-            <div className="relative" ref={branchMenuRef}>
-              <button
-                onClick={() => setShowBranchMenu(!showBranchMenu)}
-                className="flex items-center gap-1 hover:text-gray-800 dark:hover:text-zinc-200 transition-colors font-mono"
-              >
-                <span>🌱 {selectedBranch}</span>
-              </button>
-
-              <AnimatePresence>
-                {showBranchMenu && (
-                  <motion.div
-                    initial={{ opacity: 0, y: 6, scale: 0.98 }}
-                    animate={{ opacity: 1, y: 0, scale: 1 }}
-                    exit={{ opacity: 0, y: 6, scale: 0.98 }}
-                    transition={{ duration: 0.15, ease: "easeOut" }}
-                    className="absolute left-0 bottom-full mb-2 w-44 bg-white dark:bg-zinc-900 rounded-lg shadow-lg border border-gray-200 dark:border-zinc-800 py-1 z-50"
-                  >
-                    <div className="px-2 py-1 text-[10px] text-gray-400 dark:text-zinc-500 font-medium">{t("Git 分支", "Git Branch")}</div>
-                    {["master", "main", "dev-feature"].map((b) => (
-                      <button
-                        key={b}
-                        onClick={() => {
-                          setSelectedBranch(b);
-                          setShowBranchMenu(false);
-                        }}
-                        className="w-full text-left px-2.5 py-1 hover:bg-gray-100 dark:hover:bg-zinc-800 font-mono text-xs text-gray-700 dark:text-zinc-300"
-                      >
-                        {b}
-                      </button>
-                    ))}
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </div>
-          </div>
-
-          {/* Right Sub Items */}
-          <div className="flex items-center gap-3">
-            <button className="flex items-center gap-1 hover:text-gray-800 dark:hover:text-zinc-200 transition-colors">
-              <Smartphone className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500" />
-              <span>{t("移动端", "Mobile")}</span>
-            </button>
-
-            <button className="flex items-center gap-1 hover:text-gray-800 dark:hover:text-zinc-200 transition-colors">
-              <span>{t("上下文窗口", "Context Window")}</span>
-              <div className="w-3 h-3 rounded-full border-2 border-gray-300 dark:border-zinc-600 border-t-gray-600 dark:border-t-zinc-300 animate-spin-slow" />
-            </button>
           </div>
         </div>
       </div>
@@ -601,14 +718,14 @@ export const PromptInput: React.FC<PromptInputProps> = ({
               { name: "/expert-group", desc: t("多专家协同分析", "Multi-expert Analysis") },
               { name: "/nano-banana", desc: t("一句话生成创意图", "Generate Creative Image") },
               { name: "/popo-share", desc: t("快速分享构建产物", "Share Build Artifacts") },
-              ...SKILLS_LIST.map((s) => ({ name: `/${s.id}`, desc: t(s.name, s.enName) })),
+              ...skills.map((s) => ({ name: `/${s.id}`, desc: t(s.name, s.enName) })),
             ]
               .filter((cmd) => cmd.name.toLowerCase().includes(commandQuery.toLowerCase()))
               .map((cmd) => (
                 <button
                   key={cmd.name}
                   onClick={() => {
-                    const skillMatch = SKILLS_LIST.find((s) => `/${s.id}` === cmd.name);
+                    const skillMatch = skills.find((s) => `/${s.id}` === cmd.name);
                     if (skillMatch) {
                       const pillId = skillMatch.id;
                       if (!contextPills.find((p) => p.id === pillId)) {

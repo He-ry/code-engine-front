@@ -6,3 +6,8 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# IDE / runtime artifacts
+.idea/
+data/
+package-lock.json

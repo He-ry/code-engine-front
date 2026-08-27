@@ -10,6 +10,7 @@ import { Sidebar } from "./components/Sidebar";
 import { TopNavbar } from "./components/TopNavbar";
 import { PromptInput } from "./components/PromptInput";
 import { ChatStream } from "./components/ChatStream";
+import { PlanProgressCard } from "./components/PlanProgressCard";
 import { RightPanel } from "./components/RightPanel";
 import { TerminalPanel } from "./components/TerminalPanel";
 import { CodeEditor } from "./components/CodeEditor";
@@ -27,8 +28,11 @@ import {
   loadHistory,
 } from "./lib/agentClient";
 import { listProjects, createProject, writeFile, deleteFile } from "./lib/projectApi";
+import { listThreads, isOfficePreviewPath, isPdfPath } from "./lib/agentClient";
+import { getBridgeStatus } from "./lib/browserBridgeApi";
 import { DEFAULT_CHAT_MESSAGES, EN_DEFAULT_CHAT_MESSAGES } from "./data/mockData";
-import { Project, ChatMessage, ContextPill, FileNode, OpenTab, ToolExecution, ThinkingProcess } from "./types";
+import { Project, ChatMessage, ContextPill, FileNode, OpenTab, ToolExecution, ToolBlock, PlanStep, ClarificationQuestion } from "./types";
+import { blocksFromLegacyFields } from "./lib/blocks";
 import { Folder, ChevronDown, Sparkles, Check, Globe, Languages, ShieldAlert, ShieldCheck, ShieldX } from "lucide-react";
 
 const getInitialProjectId = () => {
@@ -38,6 +42,11 @@ const getInitialProjectId = () => {
   }
   return "";  // will be set after projects load
 };
+
+// Chrome extension Side Panel mode: the app is embedded in the bridge
+// extension's iframe with ?sidepanel=1 — compact chat layout + thread
+// binding pushed to the extension via localStorage.
+const isSidepanel = new URLSearchParams(window.location.search).get("sidepanel") === "1";
 
 const getInitialSettingsState = () => {
   const match = matchPath({ path: "/settings/:category" }, window.location.pathname);
@@ -54,7 +63,7 @@ const getInitialSettingsState = () => {
 };
 
 export default function App() {
-  const { t, language, isLangSwitching, isThemeSwitching, theme, isLoggedIn, user, backendApiUrl, login, backendModels, defaultModel, approvalPolicy, setApprovalPolicy } = useSettings();
+  const { t, language, isLangSwitching, isThemeSwitching, theme, isLoggedIn, user, backendApiUrl, login, backendModels, defaultModel, approvalPolicy } = useSettings();
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
   const initialProjectId = getInitialProjectId();
@@ -207,7 +216,7 @@ export default function App() {
     if (!token) return;
 
     listProjects(baseUrl, token)
-      .then((data) => {
+      .then(async (data) => {
         // Map backend fields to frontend Project shape
         const mapped: Project[] = (data || []).map((p: any) => ({
           id: p.id,
@@ -220,6 +229,29 @@ export default function App() {
           conversations: [],
           isActive: false,
         }));
+
+        // No projects yet — auto-create a default one so the chat API always
+        // has a project_id to send.
+        if (mapped.length === 0) {
+          try {
+            const p: any = await createProject(baseUrl, token, {
+              name: t("默认项目", "Default Project"),
+            });
+            mapped.push({
+              id: p.id,
+              name: p.name,
+              rootPath: p.root_path || p.rootPath,
+              gitRemote: p.git_remote || p.gitRemote,
+              gitBranch: p.git_branch || p.gitBranch || "main",
+              description: p.description,
+              conversations: [],
+              isActive: false,
+            });
+          } catch (err) {
+            console.warn("Failed to auto-create default project:", err);
+          }
+        }
+
         setProjects(mapped);
         setProjectsLoading(false);
 
@@ -314,6 +346,9 @@ export default function App() {
   // Active chat state
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
+  // Live task plan (from update_plan / plan_delta) shown above the input.
+  // Persists across turns until the next plan overwrites it.
+  const [activePlan, setActivePlan] = useState<{ steps: PlanStep[]; explanation: string } | null>(null);
   const [resolvedThreadIds, setResolvedThreadIds] = useState<Set<string>>(new Set());
   const resolvedTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
@@ -337,25 +372,34 @@ export default function App() {
   const [selectedModel, setSelectedModel] = useState<string>(() =>
     defaultModel && defaultModel !== "Auto" ? defaultModel : "Auto"
   );
-  const [selectedMode, setSelectedMode] = useState<string>(() =>
-    language === "en-US" ? "Auto Accept Edits" : "自动接受编辑"
-  );
-
-  // Sync ModeMenu selection to approvalPolicy so the chat-interface
-  // mode selector actually takes effect on the next API call.
-  const handleModeChange = (mode: string) => {
-    setSelectedMode(mode);
-    if (mode === "始终询问" || mode === "Strict") {
-      setApprovalPolicy("strict");
-    } else if (mode === "自动执行" || mode === "Auto") {
-      setApprovalPolicy("auto");
-    }
-  };
 
   // Agent backend wiring
   const threadIdRef = useRef<string | null>(null);
+  // Latest selected model name for non-React callers (attachment upload path)
+  const selectedModelRef = useRef(selectedModel);
+  useEffect(() => {
+    selectedModelRef.current = selectedModel;
+  }, [selectedModel]);
+
+  // Browser bridge (sidepanel mode): mirror threadIdRef in state so the
+  // extension binding effect can react to every assignment site.
+  const [bridgeThreadId, setBridgeThreadId] = useState<string | null>(null);
+  const [bridgeConnected, setBridgeConnected] = useState(false);
+  const [sidepanelThreads, setSidepanelThreads] = useState<{ id: string; name?: string }[]>([]);
+  const applyThreadId = (next: string | null) => {
+    threadIdRef.current = next;
+    setBridgeThreadId(next);
+  };
+
   const activeAiMsgIdRef = useRef<string | null>(null);
-  const pendingInputRef = useRef<{ inputId: string; question: string } | null>(null);
+  const pendingInputRef = useRef<{ inputId: string } | null>(null);
+  // Highest SSE event seq seen on the current stream — replayed events after
+  // a reconnect would otherwise double-append to delta-accumulating blocks.
+  // Reset whenever a new stream (turn) opens.
+  const lastSeqRef = useRef(0);
+  // File-tree refresh counter — bump after any operation that mutates files on disk
+  const [fileTreeVersion, setFileTreeVersion] = useState(0);
+
   const [pendingApprovals, setPendingApprovals] = useState<Record<string, {
     approvalId: string;
     toolName: string;
@@ -367,8 +411,54 @@ export default function App() {
     if (messages.length === 6 && messages[0].id === "msg-1") {
       setMessages(language === "en-US" ? EN_DEFAULT_CHAT_MESSAGES : DEFAULT_CHAT_MESSAGES);
     }
-    setSelectedMode(language === "en-US" ? "Auto Accept Edits" : "自动接受编辑");
   }, [language]);
+
+  // -- Sidepanel (browser bridge) mode ---------------------------------------
+
+  // Push the current thread binding to the extension (content.js polls
+  // localStorage.app_browser_bridge + listens for ce-bridge-update).
+  // Runs in every mode — the chat normally lives in a regular tab, and the
+  // latest app tab to switch threads owns the binding.
+  useEffect(() => {
+    try {
+      localStorage.setItem("app_browser_bridge", JSON.stringify({ threadId: bridgeThreadId, ts: Date.now() }));
+      window.dispatchEvent(new CustomEvent("ce-bridge-update"));
+    } catch {
+      // storage unavailable — extension falls back to 1s polling
+    }
+  }, [bridgeThreadId]);
+
+  // Extension connection indicator (5s poll; green only when connected).
+  useEffect(() => {
+    if (!isSidepanel) return;
+    let alive = true;
+    const poll = async () => {
+      const st = await getBridgeStatus(backendApiUrl || "https://agent.hery.cloud", user?.token || "");
+      if (alive) setBridgeConnected(st.connected);
+    };
+    poll();
+    const timer = setInterval(poll, 5000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [isSidepanel, backendApiUrl, user?.token]);
+
+  // Thread dropdown list (threads of the active project; reloaded when a
+  // thread is created/switched so fresh threads appear).
+  useEffect(() => {
+    if (!isSidepanel || !activeProjectId || !user?.token) return;
+    listThreads(backendApiUrl || "https://agent.hery.cloud", user.token, activeProjectId)
+      .then((threads) =>
+        setSidepanelThreads(
+          (threads || [])
+            .filter((x: any) => x?.id || x?.threadId)
+            .map((x: any) => ({ id: x.id || x.threadId, name: x.name }))
+        )
+      )
+      .catch(() => {});
+  }, [isSidepanel, activeProjectId, bridgeThreadId, backendApiUrl, user?.token]);
+
 
   // Sync selectedModel to first enabled backend model when models load
   useEffect(() => {
@@ -441,7 +531,8 @@ export default function App() {
   // New task action
   const handleNewTask = () => {
     setMessages([]);
-    threadIdRef.current = null;
+    setActivePlan(null);
+    applyThreadId(null);
   };
 
   // Load an existing thread's message history
@@ -463,7 +554,28 @@ export default function App() {
           timestamp: hm.timestamp
             ? new Date(hm.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
             : "",
+          threadId,
         };
+
+        // Map text segments — createdAt drives the interleaving order,
+        // so preserve it from the backend instead of stamping a new time.
+        if (hm.textSegments && Array.isArray(hm.textSegments) && hm.textSegments.length > 0) {
+          msg.textSegments = hm.textSegments.map((seg: any) => ({
+            text: seg.text || "",
+            createdAt: seg.createdAt || 0,
+          }));
+        }
+
+        // Map thinking/reasoning blocks
+        if (hm.thinkingProcesses && Array.isArray(hm.thinkingProcesses) && hm.thinkingProcesses.length > 0) {
+          msg.thinkingProcesses = hm.thinkingProcesses.map((tp: any) => ({
+            id: tp.id || `tp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            thoughtText: tp.thoughtText || "",
+            isCollapsed: tp.isCollapsed !== false,
+            createdAt: tp.createdAt || 0,
+          }));
+          msg.thinkingProcess = msg.thinkingProcesses[0];
+        }
 
         // Map tool executions
         if (hm.toolExecutions && Array.isArray(hm.toolExecutions) && hm.toolExecutions.length > 0) {
@@ -476,15 +588,36 @@ export default function App() {
             status: (te.status === "error" ? "error" : "success") as ToolExecution["status"],
             result: te.result || "",
             errorReason: te.errorReason || "",
-            createdAt: Date.now(),
+            createdAt: te.createdAt || 0,
+            images: Array.isArray(te.images) ? te.images : undefined,
           }));
+        }
+
+        // Standalone image-only user messages (screenshot fallback when no
+        // tool card was open when the image was recorded)
+        if (Array.isArray(hm.images) && hm.images.length > 0) {
+          msg.images = hm.images;
+        }
+
+        // Build the ordered blocks array from the mapped parallel arrays.
+        // Ordering uses the backend's synthetic monotonic clock (createdAt is
+        // a counter, not a timestamp — never mixed with Date.now()).
+        if (msg.sender === "ai") {
+          msg.blocks = blocksFromLegacyFields(
+            msg.id,
+            msg.textSegments,
+            msg.thinkingProcesses || (msg.thinkingProcess ? [msg.thinkingProcess] : undefined),
+            msg.toolExecutions,
+            msg.text
+          );
         }
 
         return msg;
       });
 
       setMessages(chatMessages);
-      threadIdRef.current = threadId;
+      setActivePlan(null);
+      applyThreadId(threadId);
     } catch (err: any) {
       console.warn("Failed to load thread history:", err);
       window.dispatchEvent(
@@ -523,7 +656,8 @@ export default function App() {
       // If the deleted thread is the currently active one, reset to new conversation
       if (threadIdRef.current === threadId) {
         setMessages([]);
-        threadIdRef.current = null;
+        setActivePlan(null);
+        applyThreadId(null);
       }
     } catch (err: any) {
       console.warn("Failed to delete thread:", err);
@@ -547,7 +681,8 @@ export default function App() {
       // If the deleted project was active, reset
       if (activeProjectIdRef.current === projectId) {
         setMessages([]);
-        threadIdRef.current = null;
+        setActivePlan(null);
+        applyThreadId(null);
         activeProjectIdRef.current = "";
         setActiveProjectId("");
         navigate("/");
@@ -587,7 +722,8 @@ export default function App() {
       activeProjectIdRef.current = mapped.id;
       setActiveProjectId(mapped.id);
       setMessages([]);
-      threadIdRef.current = null;
+      setActivePlan(null);
+      applyThreadId(null);
       navigate(`/project/${mapped.id}`);
     } catch (err: any) {
       console.warn("Failed to create project:", err);
@@ -610,50 +746,227 @@ export default function App() {
     const existing = openTabs.find((t) => t.path === file.path);
     if (existing) {
       setActiveTabPath(file.path);
-    } else {
-      const newTab: OpenTab = {
-        path: file.path,
-        name: file.name,
-        content: file.content || `// ${file.name} content\n`,
-      };
-      setOpenTabs([...openTabs, newTab]);
+      return;
+    }
+
+    // PDF — render with the browser's built-in viewer via the project static
+    // site route (no auth header needed, correct content-type).
+    if (isPdfPath(file.path) && activeProjectId) {
+      const baseUrl = backendApiUrl || "https://agent.hery.cloud";
+      const encoded = file.path.split("/").map(encodeURIComponent).join("/");
+      setOpenTabs((prev) => [
+        ...prev,
+        {
+          path: file.path,
+          name: file.name,
+          content: "",
+          readOnly: true,
+          pdfUrl: `${baseUrl}/api/projects/${encodeURIComponent(activeProjectId)}/site/${encoded}`,
+        },
+      ]);
       setActiveTabPath(file.path);
+      return;
+    }
+
+    // Office files prefer the OnlyOffice interactive editor (edit +
+    // save-back); OfficeCLI HTML render is the fallback, then raw content.
+    if (isOfficePreviewPath(file.path) && user?.token && activeProjectId) {
+      const tabPath = file.path;
+      setOpenTabs((prev) => [
+        ...prev,
+        { path: tabPath, name: file.name, content: "// 正在渲染文档…", readOnly: true },
+      ]);
+      setActiveTabPath(tabPath);
+      (async () => {
+        const baseUrl = backendApiUrl || "https://agent.hery.cloud";
+        // 1) OnlyOffice interactive editor
+        try {
+          const { getOnlyOfficeProjectConfig } = await import("./lib/projectApi");
+          const oo = await getOnlyOfficeProjectConfig(baseUrl, user!.token!, activeProjectId!, file.path, "edit");
+          if (oo.enabled && oo.config) {
+            setOpenTabs((prev) =>
+              prev.map((t) =>
+                t.path === tabPath
+                  ? { ...t, onlyofficeConfig: { documentType: oo.documentType!, config: oo.config }, readOnly: false }
+                  : t
+              )
+            );
+            return;
+          }
+        } catch {
+          // fall through to the OfficeCLI preview
+        }
+        // 2) OfficeCLI static HTML preview
+        try {
+          const { previewProjectFile } = await import("./lib/projectApi");
+          const { html } = await previewProjectFile(baseUrl, user!.token!, activeProjectId!, file.path);
+          if (html) {
+            setOpenTabs((prev) =>
+              prev.map((t) => (t.path === tabPath ? { ...t, htmlContent: html } : t))
+            );
+            return;
+          }
+        } catch {
+          // fall through to the read fallback below
+        }
+        // 3) Fallback: keep the raw content the file tree already fetched.
+        setOpenTabs((prev) =>
+          prev.map((t) =>
+            t.path === tabPath
+              ? { ...t, content: file.content || `// ${file.name} content\n` }
+              : t
+          )
+        );
+      })();
+      return;
+    }
+
+    const newTab: OpenTab = {
+      path: file.path,
+      name: file.name,
+      content: file.content || `// ${file.name} content\n`,
+    };
+    setOpenTabs([...openTabs, newTab]);
+    setActiveTabPath(file.path);
+  };
+
+  // Keep a live mirror of openTabs for async flows (SSE handlers) that must
+  // read the *current* tabs without side-effects inside a state updater.
+  const openTabsRef = useRef(openTabs);
+  useEffect(() => {
+    openTabsRef.current = openTabs;
+  }, [openTabs]);
+
+  // Re-fetch the OfficeCLI HTML render (or a fresh OnlyOffice config) for
+  // any open office tab whose workspace file just changed on disk (e.g. the
+  // agent edited the docx the user is viewing). Stale on failure — the user
+  // can reopen the tab. OnlyOffice tabs get a new config (its document.key
+  // derives from mtime) which remounts the editor with the new content.
+  const refreshOfficePreviewTabs = (changedPaths: string[]) => {
+    if (changedPaths.length === 0) return;
+    const baseUrl = backendApiUrl || "https://agent.hery.cloud";
+    const token = user?.token;
+    if (!token) return;
+    const changed = new Set(changedPaths);
+    const hits = openTabsRef.current.filter(
+      (t) =>
+        (t.htmlContent !== undefined || t.onlyofficeConfig !== undefined) &&
+        (changed.has(t.path) || changed.has(t.path.replace(/^attachment:/, "")))
+    );
+    for (const tab of hits) {
+      void (async () => {
+        try {
+          if (tab.onlyofficeConfig !== undefined) {
+            if (tab.path.startsWith("attachment:")) {
+              const wsPath = tab.path.slice("attachment:".length);
+              const tid = threadIdRef.current;
+              if (!tid) return;
+              const { getOnlyOfficeThreadConfig } = await import("./lib/agentClient");
+              const oo = await getOnlyOfficeThreadConfig(baseUrl, token, tid, wsPath, "edit");
+              if (oo.enabled && oo.config) {
+                setOpenTabs((cur) =>
+                  cur.map((t) =>
+                    t.path === tab.path
+                      ? { ...t, onlyofficeConfig: { documentType: oo.documentType!, config: oo.config } }
+                      : t
+                  )
+                );
+              }
+            } else if (activeProjectId) {
+              const { getOnlyOfficeProjectConfig } = await import("./lib/projectApi");
+              const oo = await getOnlyOfficeProjectConfig(baseUrl, token, activeProjectId, tab.path, "edit");
+              if (oo.enabled && oo.config) {
+                setOpenTabs((cur) =>
+                  cur.map((t) =>
+                    t.path === tab.path
+                      ? { ...t, onlyofficeConfig: { documentType: oo.documentType!, config: oo.config } }
+                      : t
+                  )
+                );
+              }
+            }
+            return;
+          }
+          let html: string | null = null;
+          if (tab.path.startsWith("attachment:")) {
+            const wsPath = tab.path.slice("attachment:".length);
+            const tid = threadIdRef.current;
+            if (tid) {
+              const { previewAttachmentHtml } = await import("./lib/agentClient");
+              ({ html } = await previewAttachmentHtml(baseUrl, token, tid, wsPath));
+            }
+          } else if (activeProjectId) {
+            const { previewProjectFile } = await import("./lib/projectApi");
+            ({ html } = await previewProjectFile(baseUrl, token, activeProjectId, tab.path));
+          }
+          if (html) {
+            setOpenTabs((cur) =>
+              cur.map((t) => (t.path === tab.path ? { ...t, htmlContent: html } : t))
+            );
+          }
+        } catch {
+          // keep the stale render
+        }
+      })();
     }
   };
 
   // Open file from FileChangeCard (path + content string)
-  const handleOpenFileFromCard = (path: string, content: string) => {
+  const handleOpenFileFromCard = (path: string, content: string, pendingChange?: { toolCallId: string; originalContent: string | null }) => {
     const name = path.split("/").pop() || path;
     const existing = openTabs.find((t) => t.path === path);
     if (existing) {
+      // If opening with pendingChange info, update the existing tab
+      if (pendingChange) {
+        setOpenTabs((prev) =>
+          prev.map((t) =>
+            t.path === path
+              ? {
+                  ...t,
+                  content: content || t.content,
+                  pendingChange: {
+                    toolCallId: pendingChange.toolCallId,
+                    originalContent: pendingChange.originalContent,
+                    isConfirmed: false,
+                  },
+                }
+              : t
+          )
+        );
+      }
       setActiveTabPath(path);
     } else {
       const newTab: OpenTab = {
         path,
         name,
         content: content || "",
+        ...(pendingChange
+          ? {
+              pendingChange: {
+                toolCallId: pendingChange.toolCallId,
+                originalContent: pendingChange.originalContent,
+                isConfirmed: false,
+              },
+            }
+          : {}),
       };
       setOpenTabs([...openTabs, newTab]);
       setActiveTabPath(path);
     }
   };
 
-  // Keep a file change (accept the edit — file is already on disk, just dismiss pending state)
-  const handleKeepFile = (filePath: string) => {
-    setOpenTabs((prev) =>
-      prev.map((t) =>
-        t.path === filePath && t.pendingChange
-          ? { ...t, pendingChange: { ...t.pendingChange, isConfirmed: true } }
-          : t
-      )
-    );
-  };
-
-  // Revert a file change (restore original or delete new file)
+  // Revert a file change (restore original or delete new file) + reject backend approval
   const handleRevertFile = async (filePath: string, originalContent: string | null) => {
     const baseUrl = backendApiUrl || "https://agent.hery.cloud";
     const token = user?.token || "";
     if (!token || !activeProjectId) return;
+
+    // Also reject on the backend so chat ↔ editor stay in sync
+    const tab = openTabs.find(t => t.path === filePath);
+    const toolCallId = tab?.pendingChange?.toolCallId;
+    if (toolCallId) {
+      handleApproval(false, toolCallId);
+    }
 
     try {
       if (originalContent === null) {
@@ -685,6 +998,8 @@ export default function App() {
           },
         })
       );
+      // Refresh the file tree since files on disk changed
+      setFileTreeVersion(v => v + 1);
     } catch (err: any) {
       window.dispatchEvent(
         new CustomEvent("app:show_toast", {
@@ -721,6 +1036,11 @@ export default function App() {
 
   // Close tab
   const handleCloseTab = (path: string) => {
+    // Release blob-backed PDF object URLs so the fetched bytes can be GC'd.
+    const closing = openTabs.find((t) => t.path === path);
+    if (closing?.pdfUrl?.startsWith("blob:")) {
+      URL.revokeObjectURL(closing.pdfUrl);
+    }
     const nextTabs = openTabs.filter((t) => t.path !== path);
     setOpenTabs(nextTabs);
     if (activeTabPath === path) {
@@ -789,30 +1109,46 @@ export default function App() {
   ) => {
     const { type, data } = ev;
     const now = Date.now();
+
+    // Reconnect-safety: skip events already seen on this stream (the backend
+    // ships `seq` in every payload; old backends send none → guard inert).
+    // NOTE: seq is only a dedupe guard — display order is arrival order.
+    const seq = typeof data?.seq === "number" ? data.seq : 0;
+    if (seq) {
+      if (seq <= lastSeqRef.current) return;
+      lastSeqRef.current = seq;
+    }
+
+    // All cases below operate on the ordered `blocks` array (arrival order =
+    // display order). The legacy parallel arrays are no longer written by the
+    // live path; rendering reads blocks only.
     switch (type) {
       case "agent_message_delta": {
         const delta = data.delta || data.agentMessageDelta || "";
+        const itemId = data.itemId || data.item_id || "";
         if (!delta) break;
         setMessages((prev) =>
           prev.map((m) => {
             if (m.id !== aiMsgId) return m;
-            const segments = m.textSegments ? [...m.textSegments] : [];
-            if (segments.length === 0) {
-              segments.push({ text: "", createdAt: now });
+            const blocks = [...(m.blocks || [])];
+            const last = blocks[blocks.length - 1];
+            if (last && last.kind === "text" && (last.id === itemId || !itemId)) {
+              blocks[blocks.length - 1] = { ...last, text: last.text + delta };
+            } else {
+              // Model moved on to the answer — seal any open reasoning block.
+              if (last && last.kind === "reasoning" && !last.endedAt) {
+                blocks[blocks.length - 1] = { ...last, endedAt: now };
+              }
+              blocks.push({
+                kind: "text",
+                id: itemId || `text-${now}`,
+                text: delta,
+              });
             }
-            const last = segments[segments.length - 1];
-            // If this is the first content filling an empty placeholder,
-            // update the timestamp so sorting reflects actual text time,
-            // not the earlier item_started / tool announcement.
-            const wasEmpty = last.text.length === 0;
-            segments[segments.length - 1] = {
-              text: last.text + delta,
-              createdAt: wasEmpty ? now : last.createdAt,
-            };
             return {
               ...m,
+              blocks,
               text: m.text + delta,
-              textSegments: segments,
               agentStatus: "generating",
             };
           })
@@ -821,170 +1157,129 @@ export default function App() {
       }
       case "reasoning_text_delta": {
         const delta = data.delta || "";
+        const itemId = data.itemId || data.item_id || "";
         if (!delta) break;
         setMessages((prev) =>
           prev.map((m) => {
             if (m.id !== aiMsgId) return m;
-
-            let list: ThinkingProcess[] = m.thinkingProcesses
-              ? [...m.thinkingProcesses]
-              : m.thinkingProcess
-              ? [{ ...m.thinkingProcess }]
-              : [];
-
-            const lastBlock = list[list.length - 1];
-            const toolsExist = Boolean(m.toolExecutions && m.toolExecutions.length > 0);
-            const lastToolTime = toolsExist ? (m.toolExecutions![m.toolExecutions!.length - 1].createdAt || 0) : 0;
-            const lastBlockTime = lastBlock ? (lastBlock.createdAt || 0) : 0;
-
-            if (!lastBlock || (toolsExist && lastToolTime > lastBlockTime && lastBlock.thoughtText.trim().length > 0)) {
-              list.push({
-                id: `tp-${now}-${Math.random().toString(36).slice(2, 6)}`,
-                thoughtText: delta,
-                isCollapsed: true,
-                createdAt: now,
-              });
+            const blocks = [...(m.blocks || [])];
+            const last = blocks[blocks.length - 1];
+            if (
+              last &&
+              last.kind === "reasoning" &&
+              (last.id === itemId || !itemId)
+            ) {
+              blocks[blocks.length - 1] = { ...last, text: last.text + delta };
             } else {
-              list[list.length - 1] = {
-                ...lastBlock,
-                thoughtText: lastBlock.thoughtText + delta,
-              };
+              blocks.push({
+                kind: "reasoning",
+                id: itemId || `reasoning-${now}`,
+                text: delta,
+                startedAt: now,
+              });
             }
-
-            return {
-              ...m,
-              agentStatus: "thinking",
-              thinkingProcesses: list,
-              thinkingProcess: list[0],
-            };
-          })
-        );
-        break;
-      }
-      case "reasoning_part_added": {
-        setMessages((prev) =>
-          prev.map((m) => {
-            if (m.id !== aiMsgId) return m;
-            const list: ThinkingProcess[] = m.thinkingProcesses
-              ? [...m.thinkingProcesses]
-              : m.thinkingProcess
-              ? [{ ...m.thinkingProcess }]
-              : [];
-
-            if (list.length > 0 && !list[list.length - 1].thoughtText.trim()) {
-              return m;
-            }
-
-            const newBlock: ThinkingProcess = {
-              id: `tp-${now}-${Math.random().toString(36).slice(2, 6)}`,
-              thoughtText: "",
-              isCollapsed: true,
-              createdAt: now,
-            };
-
-            const updated = [...list, newBlock];
-            return { ...m, thinkingProcesses: updated, thinkingProcess: updated[0] };
+            return { ...m, blocks, agentStatus: "thinking" };
           })
         );
         break;
       }
       case "command_execution_output_delta": {
         // Stream argument deltas (e.g. file content) to the matching
-        // tool card so the user sees real-time writing progress.
-        // Creates a placeholder tool card when the delta arrives
-        // BEFORE the matching item_started event.
+        // tool block so the user sees real-time writing progress.
         const deltaItemId = data.itemId || data.item_id || "";
         const deltaText = data.delta || "";
         if (!deltaItemId || !deltaText) break;
         setMessages((prev) =>
           prev.map((m) => {
             if (m.id !== aiMsgId) return m;
-            const tools = [...(m.toolExecutions || [])];
-            const existingIdx = tools.findIndex((te) => te.id === deltaItemId);
-            if (existingIdx >= 0) {
-              tools[existingIdx] = {
-                ...tools[existingIdx],
-                contentDelta: (tools[existingIdx].contentDelta || "") + deltaText,
-                status: "running" as const,
+            const blocks = [...(m.blocks || [])];
+            const idx = blocks.findIndex(
+              (b) => b.kind === "tool" && b.id === deltaItemId
+            );
+            if (idx >= 0) {
+              const b = blocks[idx] as ToolBlock;
+              blocks[idx] = {
+                ...b,
+                tool: {
+                  ...b.tool,
+                  contentDelta: (b.tool.contentDelta || "") + deltaText,
+                  status: "running" as const,
+                },
               };
             } else {
-              // Tool card not yet created by item_started — insert placeholder
-              tools.push({
+              // Legacy-backend compat: args delta before item_started →
+              // placeholder in arrival position (name filled by item_started).
+              blocks.push({
+                kind: "tool",
                 id: deltaItemId,
-                name: "",
-                command: "",
-                status: "running",
-                contentDelta: deltaText,
-                createdAt: now,
+                tool: {
+                  id: deltaItemId,
+                  name: "",
+                  command: "",
+                  status: "running",
+                  contentDelta: deltaText,
+                  createdAt: now,
+                },
               });
             }
-            return { ...m, toolExecutions: tools };
+            return { ...m, blocks };
           })
         );
         break;
       }
       case "item_started": {
         const item = data.item || {};
-        // ---- new agent_message = new LLM sampling loop iteration ----
-        // Start a fresh text segment so text across tool-execution
-        // boundaries (different loop iterations) never mixes.
-        if (item.type === "agent_message") {
-          setMessages((prev) =>
-            prev.map((m) => {
-              if (m.id !== aiMsgId) return m;
-              const segments = m.textSegments ? [...m.textSegments] : [];
-              const last = segments[segments.length - 1];
-              if (!last || last.text.length > 0) {
-                segments.push({ text: "", createdAt: now });
-              }
-              return { ...m, textSegments: segments };
-            })
-          );
-          break;
-        }
-        // ---- tool call announced ----
+        // ---- agent_message: blocks open lazily on the first delta ----
+        // (backend emits item_started at the first reasoning/text delta of a
+        // round; the round's itemId opens/extends blocks by itself).
+        if (item.type === "agent_message") break;
+
+        // ---- tool call announced (provisional at first arg delta, or
+        // authoritative at finish with command + compacted args) ----
         if (item.type === "command_execution") {
           const args = item.arguments || {};
-          const execId = item.id || item.callId || `te-${now}-${Math.random().toString(36).slice(2, 7)}`;
-          const execName = item.toolName || item.tool || "tool";
+          const execId = item.id || item.callId || `te-${now}`;
+          const execName = item.toolName || item.tool || "";
           const execCmd = item.command || "";
           const execArgs = typeof args === "string" ? args : JSON.stringify(args);
           setMessages((prev) =>
             prev.map((m) => {
               if (m.id !== aiMsgId) return m;
-              const tools = [...(m.toolExecutions || [])];
-              const existingIdx = tools.findIndex((te) => te.id === execId);
-              if (existingIdx >= 0) {
-                // Update placeholder created by an earlier command_execution_output_delta
-                tools[existingIdx] = {
-                  ...tools[existingIdx],
-                  name: execName || tools[existingIdx].name,
-                  command: execCmd || tools[existingIdx].command,
-                  args: execArgs || tools[existingIdx].args,
-                  description: execCmd || tools[existingIdx].description,
+              const blocks = [...(m.blocks || [])];
+              const idx = blocks.findIndex(
+                (b) => b.kind === "tool" && b.id === execId
+              );
+              if (idx >= 0) {
+                // Upsert the placeholder created by an earlier
+                // command_execution_output_delta / provisional item_started.
+                const b = blocks[idx] as ToolBlock;
+                blocks[idx] = {
+                  ...b,
+                  tool: {
+                    ...b.tool,
+                    name: execName || b.tool.name,
+                    command: execCmd || b.tool.command,
+                    args: execArgs || b.tool.args,
+                    description: execCmd || b.tool.description,
+                    status: b.tool.status === "pending" ? "pending" : "running",
+                  },
                 };
               } else {
-                tools.push({
+                blocks.push({
+                  kind: "tool",
                   id: execId,
-                  name: execName,
-                  command: execCmd,
-                  args: execArgs,
-                  description: execCmd,
-                  status: "running",
-                  createdAt: now,
+                  tool: {
+                    id: execId,
+                    name: execName,
+                    command: execCmd,
+                    args: execArgs,
+                    description: execCmd,
+                    status: "running",
+                    createdAt: now,
+                  },
                 });
               }
-              const segments = m.textSegments ? [...m.textSegments] : [];
-              const last = segments[segments.length - 1];
-              if (!last || last.text.length > 0) {
-                segments.push({ text: "", createdAt: now });
-              }
-              return {
-                ...m,
-                agentStatus: "executing_tool",
-                toolExecutions: tools,
-                textSegments: segments,
-              };
+              return { ...m, blocks, agentStatus: "executing_tool" };
             })
           );
         }
@@ -1006,93 +1301,173 @@ export default function App() {
               m.id === aiMsgId
                 ? {
                     ...m,
-                    toolExecutions: (m.toolExecutions || []).map((te) =>
-                      te.id === id
-                        ? {
-                            ...te,
-                            status,
-                            result,
-                            errorReason,
-                            wasAborted,
-                            ...(args ? { args: typeof args === "string" ? args : JSON.stringify(args) } : {}),
-                            ...(item.command ? { command: item.command, description: item.command } : {}),
-                          }
-                        : te
-                    ),
+                    blocks: (m.blocks || []).map((b) => {
+                      if (b.kind !== "tool" || b.id !== id) return b;
+                      return {
+                        ...b,
+                        tool: {
+                          ...b.tool,
+                          status,
+                          result,
+                          errorReason,
+                          wasAborted,
+                          completedAt: now,
+                          ...(args ? { args: typeof args === "string" ? args : JSON.stringify(args) } : {}),
+                          ...(item.command ? { command: item.command, description: item.command } : {}),
+                          ...(Array.isArray(item.images) && item.images.length > 0 ? { images: item.images } : {}),
+                        },
+                      };
+                    }),
                   }
                 : m
             )
           );
         }
-        // file_change item — write_file / apply_patch completed with structured file list
+        // file_change item — write_file / apply_patch completed with structured file list.
+        // Attach by call id — never "last tool" (completions arrive unordered
+        // when tools run concurrently, and groups make position meaningless).
         if (item.type === "file_change") {
           const itemId = item.id || item.callId || "";
           const files = item.files || [];
           const stats = item.fileStats || { added: 0, removed: 0 };
+          // Refresh the file explorer since files changed on disk
+          setFileTreeVersion(v => v + 1);
+          // Re-render any open Office HTML preview tabs whose file just
+          // changed on disk (e.g. the agent edited the docx being previewed).
+          refreshOfficePreviewTabs(files.map((f: any) => String(f.path || "")));
           setMessages((prev) =>
             prev.map((m) =>
               m.id === aiMsgId
                 ? {
                     ...m,
-                    toolExecutions: (m.toolExecutions || []).map((te) =>
-                      te.id === itemId
-                        ? { ...te, files, fileStats: stats, status: "success" as const }
-                        : te
+                    blocks: (m.blocks || []).map((b) =>
+                      b.kind === "tool" && b.id === itemId
+                        ? {
+                            ...b,
+                            tool: {
+                              ...b.tool,
+                              files,
+                              fileStats: stats,
+                              status: "success" as const,
+                              completedAt: now,
+                            },
+                          }
+                        : b
                     ),
                   }
                 : m
             )
           );
         }
-        // item_completed (agent_message) — no action needed;
-        // text segments are already sealed by the last tool.
+        // item_completed (agent_message) — blocks never depend on it; the
+        // OpenAI protocol doesn't even emit it for tool-call rounds.
         break;
       }
       case "user_input_required": {
         const inputId = data.inputId || data.input_id || "";
-        const question = data.question || "";
+        // Backward-compat: legacy single free-text question.
+        const questions: ClarificationQuestion[] = Array.isArray(data.questions)
+          ? data.questions.map((q: any) => ({
+              id: q.id || "",
+              header: q.header || "",
+              question: q.question || "",
+              options: Array.isArray(q.options)
+                ? q.options.map((o: any) => ({
+                    label: o.label || "",
+                    description: o.description || "",
+                  }))
+                : [],
+            }))
+          : data.question
+          ? [{ id: "q1", header: "", question: data.question, options: [] }]
+          : [];
+
         if (inputId) {
-          pendingInputRef.current = { inputId, question };
+          pendingInputRef.current = { inputId };
           setMessages((prev) =>
-            prev.map((m) =>
-              m.id === aiMsgId
-                ? {
-                    ...m,
-                    agentStatus: "asking_clarification",
-                    clarificationQuestions: [
-                      {
-                        id: inputId,
-                        question,
-                        options: [
-                          {
-                            label: t("输入回答...", "Type your answer..."),
-                            value: "custom",
-                            isCustomInput: true,
-                          },
-                        ],
-                      },
-                    ],
-                  }
-                : m
-            )
+            prev.map((m) => {
+              if (m.id !== aiMsgId) return m;
+              const blocks = [...(m.blocks || [])];
+              // Seal any open reasoning block, then insert the ask card as an
+              // ordered block at its arrival position — later blocks (the
+              // agent's post-answer output) render BELOW it by construction.
+              const last = blocks[blocks.length - 1];
+              if (last && last.kind === "reasoning" && !last.endedAt) {
+                blocks[blocks.length - 1] = { ...last, endedAt: now };
+              }
+              if (!blocks.some((b) => b.kind === "ask" && b.id === inputId)) {
+                blocks.push({ kind: "ask", id: inputId, questions, createdAt: now });
+              }
+              return { ...m, blocks, agentStatus: "asking_clarification" };
+            })
           );
         }
+        break;
+      }
+      case "user_input_expired": {
+        // Backend gave up waiting (300s timeout) and resumed the turn —
+        // close the card instead of leaving it interactive forever.
+        const inputId = data.inputId || data.input_id || "";
+        if (!inputId) break;
+        if (pendingInputRef.current?.inputId === inputId) {
+          pendingInputRef.current = null;
+        }
+        setMessages((prev) =>
+          prev.map((m) => {
+            if (m.id !== aiMsgId) return m;
+            let touched = false;
+            const blocks = (m.blocks || []).map((b) => {
+              if (b.kind === "ask" && b.id === inputId && !b.answers && !b.expired) {
+                touched = true;
+                return { ...b, expired: true };
+              }
+              return b;
+            });
+            return touched
+              ? {
+                  ...m,
+                  blocks,
+                  agentStatus:
+                    m.agentStatus === "asking_clarification" ? "generating" : m.agentStatus,
+                }
+              : m;
+          })
+        );
         break;
       }
       case "turn_complete": {
         // Mark streaming complete and record final message text
         const finalMsg = data.finalMessage || data.final_message || "";
         setMessages((prev) =>
-          prev.map((m) =>
-            m.id === aiMsgId
-              ? {
-                  ...m,
-                  agentStatus: "completed",
-                  isStreaming: false,
-                  ...(finalMsg && !m.text ? { text: finalMsg } : {}),
-                }
-              : m
-          )
+          prev.map((m) => {
+            if (m.id !== aiMsgId) return m;
+            let blocks = [...(m.blocks || [])];
+            // Seal the last open reasoning block (the model never "closes" it).
+            const last = blocks[blocks.length - 1];
+            if (last && last.kind === "reasoning" && !last.endedAt) {
+              blocks[blocks.length - 1] = { ...last, endedAt: now };
+            }
+            // Stamp a terminal time on tools still marked running (e.g. their
+            // item_completed was dropped under queue backpressure).
+            blocks = blocks.map((b) =>
+              b.kind === "tool" && b.tool.status === "running" && !b.tool.completedAt
+                ? { ...b, tool: { ...b.tool, completedAt: now } }
+                : b
+            );
+            // If every text delta was dropped under backpressure, backfill the
+            // final message so the turn still shows its answer.
+            const hasText = blocks.some((b) => b.kind === "text" && b.text.trim().length > 0);
+            if (finalMsg && !hasText) {
+              blocks.push({ kind: "text", id: `final-${now}`, text: finalMsg });
+            }
+            return {
+              ...m,
+              blocks,
+              agentStatus: "completed",
+              isStreaming: false,
+              ...(finalMsg && !m.text ? { text: finalMsg } : {}),
+            };
+          })
         );
         break;
       }
@@ -1103,9 +1478,6 @@ export default function App() {
         const execCmd = args.command || args.path || args.query || args.pattern || toolName;
 
         // All tools (including file tools) go through the normal approval flow.
-        // During streaming the file content was shown in thinking-mode style;
-        // now that arguments are complete, switch the tool card to "pending"
-        // so the user can review the diff before deciding.
         setPendingApprovals((prev) => ({
           ...prev,
           [approvalId]: { approvalId, toolName, arguments: args },
@@ -1113,23 +1485,37 @@ export default function App() {
         setMessages((prev) =>
           prev.map((m) => {
             if (m.id !== aiMsgId) return m;
-            const tools = [...(m.toolExecutions || [])];
-            const existingIdx = tools.findIndex((te) => te.id === approvalId);
-            if (existingIdx >= 0) {
-              // Update existing tool card (created by item_started) to pending
-              tools[existingIdx] = { ...tools[existingIdx], status: "pending" as const };
+            const blocks = [...(m.blocks || [])];
+            const idx = blocks.findIndex(
+              (b) => b.kind === "tool" && b.id === approvalId
+            );
+            if (idx >= 0) {
+              // Update the tool block (created by item_started) to pending
+              const b = blocks[idx] as ToolBlock;
+              blocks[idx] = {
+                ...b,
+                tool: {
+                  ...b.tool,
+                  status: "pending" as const,
+                  name: b.tool.name || toolName,
+                },
+              };
             } else {
               // item_started may have been dropped under queue pressure —
-              // create a placeholder tool card so the user sees the approval UI
-              tools.push({
+              // create a placeholder tool block so the approval UI is reachable.
+              blocks.push({
+                kind: "tool",
                 id: approvalId,
-                name: toolName,
-                command: execCmd,
-                status: "pending" as const,
-                createdAt: now,
+                tool: {
+                  id: approvalId,
+                  name: toolName,
+                  command: execCmd,
+                  status: "pending" as const,
+                  createdAt: now,
+                },
               });
             }
-            return { ...m, toolExecutions: tools };
+            return { ...m, blocks };
           })
         );
         break;
@@ -1138,34 +1524,34 @@ export default function App() {
         const explanation = data.explanation || "";
         const plan: Array<{ step: string; status: string }> = data.plan || [];
         if (plan.length === 0) break;
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === aiMsgId
-              ? {
-                  ...m,
-                  planSteps: plan.map((p: any) => ({
-                    step: p.step || "",
-                    status: (p.status || "pending") as "pending" | "in_progress" | "completed" | "failed",
-                  })),
-                  planExplanation: explanation || m.planExplanation || "",
-                }
-              : m
-          )
-        );
+        setActivePlan({
+          steps: plan.map((p) => ({
+            step: p.step || "",
+            status: (p.status || "pending") as PlanStep["status"],
+          })),
+          explanation,
+        });
         break;
       }
       case "error": {
-        const msg = data.message || data.error || "Agent error";
+        // Backend already maps raw provider payloads to one friendly line.
+        // Show it as a transient toast — never append provider errors to
+        // the chat transcript.
+        const msg = data.message || data.error || t("模型服务暂时不可用，请稍后重试或切换模型", "Model service unavailable, please retry or switch models");
+        window.dispatchEvent(
+          new CustomEvent("app:show_toast", {
+            detail: {
+              type: "error",
+              title: t("生成失败", "Generation Failed"),
+              description: msg,
+              duration: 5000,
+            },
+          })
+        );
         setMessages((prev) =>
           prev.map((m) =>
             m.id === aiMsgId
-              ? {
-                  ...m,
-                  text:
-                    m.text + (m.text ? "\n\n" : "") + `> ⚠️ ${msg}`,
-                  agentStatus: "completed",
-                  isStreaming: false,
-                }
+              ? { ...m, agentStatus: "completed", isStreaming: false }
               : m
           )
         );
@@ -1176,36 +1562,123 @@ export default function App() {
     }
   };
 
-  /** Handle AskUser card submission → forward to the backend respond API. */
-  const handleAskUserSubmit = async (
-    questionId: string,
-    _optionValue: string,
-    optionLabel: string
-  ) => {
+  /** Handle AskUser card submission → forward the answers map to the backend.
+   *
+   *  ``answers`` maps each question id to the selected option label (or the
+   *  free-text typed under "Other"). Sent as a single JSON payload for the
+   *  ``input_id`` captured from the ``user_input_required`` SSE event.
+   */
+  const handleAskUserSubmit = async (inputId: string, answers: Record<string, string>) => {
     const pending = pendingInputRef.current;
     const threadId = threadIdRef.current;
-    if (!pending || pending.inputId !== questionId || !threadId) return;
-
-    // optionLabel is "Question\n答：Answer" — extract the answer after the label.
-    let answer = "";
-    for (const line of (optionLabel || "").split("\n")) {
-      const m = line.match(/(?:答：|Answer:)\s*(.+)/);
-      if (m) answer = m[1].trim();
+    // Prefer the explicit inputId; fall back to the captured pending one.
+    const effectiveInputId = inputId || pending?.inputId || "";
+    if (!effectiveInputId || !threadId) return;
+    if (pendingInputRef.current?.inputId === effectiveInputId) {
+      pendingInputRef.current = null;
     }
-    if (!answer) answer = optionLabel || "";
 
+    const baseUrl = backendApiUrl || "https://agent.hery.cloud";
+    const token = user?.token || "";
+
+    // Stamp the answers onto the ask block so the card flips to its
+    // read-only "answered" summary immediately (before the backend resumes).
+    setMessages((prev) =>
+      prev.map((m) => {
+        if (!m.blocks?.some((b) => b.kind === "ask" && b.id === effectiveInputId)) {
+          return m;
+        }
+        return {
+          ...m,
+          blocks: m.blocks.map((b) =>
+            b.kind === "ask" && b.id === effectiveInputId ? { ...b, answers } : b
+          ),
+        };
+      })
+    );
+
+    // Answer the pending input request.
     try {
-      await respondInput(
-        backendApiUrl || "https://agent.hery.cloud",
-        user?.token || "",
-        threadId,
-        pending.inputId,
-        answer
-      );
+      await respondInput(baseUrl, token, threadId, effectiveInputId, answers);
     } catch (e) {
       console.warn("AskUser respond failed:", e);
+      return;
     }
-    pendingInputRef.current = null;
+
+    // Close the pre-answer SSE stream before opening a new one. Without this
+    // both connections stay subscribed and randomly split the backend's
+    // single event queue between them — post-answer output then lands on the
+    // OLD message (above the ask card) and the transcript garbles. The
+    // backend also supersedes old consumers (single-consumer stream), but
+    // aborting here keeps the client from racing it.
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+
+    // The agent resumes after answering — open a fresh assistant message and
+    // stream whatever it produces next, so the answered card stays in place
+    // and new output appears below it.
+    setIsGenerating(true);
+    const aiMsgId = (Date.now() + 1).toString();
+    activeAiMsgIdRef.current = aiMsgId;
+    lastSeqRef.current = 0; // resumed turn → new event stream
+    const aiMsg: ChatMessage = {
+      id: aiMsgId,
+      sender: "ai",
+      text: "",
+      timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      model: [...messages].reverse().find((m) => m.sender === "ai")?.model,
+      agentStatus: "thinking",
+      isStreaming: true,
+      blocks: [],
+    };
+    setMessages((prev) => [...prev, aiMsg]);
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    try {
+      await streamChat(baseUrl, token, threadId, (ev) => {
+        if (controller.signal.aborted) return;
+        handleAgentEvent(ev, aiMsgId);
+      }, controller.signal);
+      markThreadResolved(threadId);
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === aiMsgId
+            ? { ...m, agentStatus: "completed", isStreaming: false }
+            : m
+        )
+      );
+    } catch (err: any) {
+      if (err?.name === "AbortError") return; // superseded by a newer stream
+      // Stream-level failure — toast only, never write provider errors into
+      // the chat transcript.
+      window.dispatchEvent(
+        new CustomEvent("app:show_toast", {
+          detail: {
+            type: "error",
+            title: t("生成失败", "Generation Failed"),
+            description: err?.message || t("模型服务暂时不可用，请稍后重试", "Model service unavailable, please retry"),
+            duration: 5000,
+          },
+        })
+      );
+      markThreadResolved(threadIdRef.current || "");
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === aiMsgId
+            ? { ...m, agentStatus: "completed", isStreaming: false }
+            : m
+        )
+      );
+    } finally {
+      // Only tear down generation state if this stream is still the active
+      // one — a newer stream (e.g. the next user message) may already own it.
+      if (abortControllerRef.current === controller) {
+        setIsGenerating(false);
+        activeAiMsgIdRef.current = null;
+      }
+    }
   };
 
   /** Approve or deny a pending sensitive-tool approval. */
@@ -1249,13 +1722,301 @@ export default function App() {
     }
   };
 
+  // Keep a file change — approve on backend + dismiss pending state locally
+  const handleKeepFile = (filePath: string) => {
+    // Find the toolCallId from the tab's pendingChange and approve on backend
+    const tab = openTabs.find(t => t.path === filePath);
+    const toolCallId = tab?.pendingChange?.toolCallId;
+    if (toolCallId) {
+      handleApproval(true, toolCallId);
+    }
+
+    setOpenTabs((prev) =>
+      prev.map((t) =>
+        t.path === filePath && t.pendingChange
+          ? { ...t, pendingChange: { ...t.pendingChange, isConfirmed: true } }
+          : t
+      )
+    );
+    // Refresh the file tree since files on disk changed
+    setFileTreeVersion(v => v + 1);
+  };
+
+  // Attachment preview: extract text server-side, then open it as a
+  // read-only tab in the editor area (no modal). Tab path is namespaced
+  // with "attachment:" so it can't collide with project file paths.
+  const attachmentTabPath = (workspacePath: string) => `attachment:${workspacePath}`;
+
+  const handleOpenAttachment = async (
+    att: {
+      filename: string;
+      workspacePath: string;
+      contentType?: string;
+    },
+    msgThreadId?: string
+  ) => {
+    const baseUrl = backendApiUrl || "https://agent.hery.cloud";
+    const token = user?.token || "";
+    // Prefer the owning message's thread — after a thread switch the current
+    // threadIdRef points elsewhere and would 404 on the old workspace path.
+    const threadId = msgThreadId || threadIdRef.current;
+    if (!token || !threadId) return;
+
+    const tabPath = attachmentTabPath(att.workspacePath);
+    const existing = openTabs.find((tab) => tab.path === tabPath);
+    if (
+      existing &&
+      (existing.onlyofficeConfig !== undefined ||
+        existing.htmlContent !== undefined ||
+        (existing.content && !existing.content.startsWith("// 正在解析")))
+    ) {
+      setActiveTabPath(tabPath);
+      return;
+    }
+
+    // PDF — download with auth, then render the blob in the browser's
+    // built-in PDF viewer. Falls back to the text-extract flow on failure.
+    if (isPdfPath(att.workspacePath)) {
+      // Placeholder tab while fetching.
+      setOpenTabs((prev) => {
+        const next = prev.filter((tab) => tab.path !== tabPath);
+        return [...next, { path: tabPath, name: att.filename, content: "// 正在加载 PDF…", readOnly: true }];
+      });
+      setActiveTabPath(tabPath);
+      try {
+        const { downloadThreadFileUrl } = await import("./lib/agentClient");
+        const url = await downloadThreadFileUrl(baseUrl, token, threadId, att.workspacePath);
+        setOpenTabs((prev) =>
+          prev.map((tab) => (tab.path === tabPath ? { ...tab, pdfUrl: url, content: "" } : tab))
+        );
+        return;
+      } catch {
+        // fall through to the text-extraction fallback below
+      }
+    }
+
+    // Office documents (docx/xlsx/pptx) prefer the OnlyOffice interactive
+    // editor (edit + save-back); the OfficeCLI HTML render is the fallback;
+    // null html or any error falls back to the plain-text extract below.
+    if (isOfficePreviewPath(att.workspacePath)) {
+      try {
+        const { getOnlyOfficeThreadConfig } = await import("./lib/agentClient");
+        const oo = await getOnlyOfficeThreadConfig(baseUrl, token, threadId, att.workspacePath, "edit");
+        if (oo.enabled && oo.config) {
+          setOpenTabs((prev) => {
+            const next = prev.filter((tab) => tab.path !== tabPath);
+            return [
+              ...next,
+              {
+                path: tabPath,
+                name: att.filename,
+                content: "",
+                onlyofficeConfig: { documentType: oo.documentType!, config: oo.config },
+              },
+            ];
+          });
+          setActiveTabPath(tabPath);
+          return;
+        }
+      } catch {
+        // fall through to OfficeCLI preview
+      }
+      try {
+        const { previewAttachmentHtml } = await import("./lib/agentClient");
+        const { html } = await previewAttachmentHtml(baseUrl, token, threadId, att.workspacePath);
+        if (html) {
+          setOpenTabs((prev) => {
+            const next = prev.filter((tab) => tab.path !== tabPath);
+            return [...next, { path: tabPath, name: att.filename, content: "", htmlContent: html, readOnly: true }];
+          });
+          setActiveTabPath(tabPath);
+          return;
+        }
+      } catch {
+        // fall through to text extraction
+      }
+    }
+
+    // Placeholder tab while parsing (or reuse the stale one).
+    setOpenTabs((prev) => {
+      const next = prev.filter((tab) => tab.path !== tabPath);
+      return [
+        ...next,
+        { path: tabPath, name: att.filename, content: "// 正在解析文档…", readOnly: true },
+      ];
+    });
+    setActiveTabPath(tabPath);
+
+    try {
+      const { extractAttachmentText } = await import("./lib/agentClient");
+      const { text } = await extractAttachmentText(baseUrl, token, threadId, att.workspacePath);
+      setOpenTabs((prev) =>
+        prev.map((tab) =>
+          tab.path === tabPath ? { ...tab, content: text || "// 空文档" } : tab
+        )
+      );
+    } catch (err: any) {
+      const msg = err?.message || t("文档解析失败", "Failed to parse document");
+      setOpenTabs((prev) =>
+        prev.map((tab) =>
+          tab.path === tabPath
+            ? { ...tab, content: `${t("预览失败", "Preview failed")}：${msg}\n\n${t("可点击右上角下载按钮获取原文件。", "Use the download button above to get the original file.")}` }
+            : tab
+        )
+      );
+    }
+  };
+
+  // Download the raw attachment/workspace file via the thread download API.
+  const handleDownloadAttachment = async (workspacePath?: string) => {
+    const baseUrl = backendApiUrl || "https://agent.hery.cloud";
+    const token = user?.token || "";
+    const threadId = threadIdRef.current;
+    if (!token || !threadId) {
+      window.dispatchEvent(
+        new CustomEvent("app:show_toast", {
+          detail: {
+            type: "warning",
+            title: t("无法下载", "Cannot Download"),
+            description: t("请先登录并打开一个会话", "Log in and open a session first"),
+          },
+        })
+      );
+      return;
+    }
+    const path = workspacePath
+      ?? (activeTabPath?.startsWith("attachment:") ? activeTabPath.slice("attachment:".length) : undefined);
+    if (!path) return;
+    try {
+      const { saveWorkspaceFileAs } = await import("./lib/agentClient");
+      await saveWorkspaceFileAs(baseUrl, token, threadId, path);
+    } catch (err: any) {
+      window.dispatchEvent(
+        new CustomEvent("app:show_toast", {
+          detail: {
+            type: "error",
+            title: t("下载失败", "Download Failed"),
+            description: err?.message || String(err),
+          },
+        })
+      );
+    }
+  };
+
+  // Upload a real file attachment into the thread workspace. Creates the
+  // thread on demand when this is the first attachment of a new chat, so
+  // files can be attached before any message is typed.
+  const handleUploadAttachment = async (
+    file: File
+  ): Promise<ContextPill["attachment"] | null> => {
+    const baseUrl = backendApiUrl || "https://agent.hery.cloud";
+    const token = user?.token || "";
+    if (!token) {
+      window.dispatchEvent(
+        new CustomEvent("app:show_toast", {
+          detail: {
+            type: "warning",
+            title: t("请先登录", "Log In First"),
+            description: t("登录后才能上传文件供 Agent 读取", "Log in to attach files for the agent"),
+          },
+        })
+      );
+      return null;
+    }
+
+    // Resolve the model needed to create a thread when none exists yet.
+    let threadId = threadIdRef.current;
+    if (!threadId) {
+      const localModelName = selectedModelRef.current;
+      const modelId = resolveModelId(localModelName);
+      if (!modelId) {
+        window.dispatchEvent(
+          new CustomEvent("app:show_toast", {
+            detail: {
+              type: "error",
+              title: t("未配置可用模型", "No model configured"),
+              description: t("新对话上传文件需要先创建会话，请先在设置中启用模型", "A model is required to start a session"),
+            },
+          })
+        );
+        return null;
+      }
+      try {
+        const threadName =
+          file.name.length > 30 ? file.name.slice(0, 30) + "..." : file.name;
+        const created = await createThread(baseUrl, token, modelId, threadName, activeProjectIdRef.current, approvalPolicy);
+        threadId = created.threadId;
+        applyThreadId(threadId);
+        window.dispatchEvent(
+          new CustomEvent("app:thread_created", {
+            detail: { projectId: activeProjectId, thread: created },
+          })
+        );
+      } catch (err: any) {
+        window.dispatchEvent(
+          new CustomEvent("app:show_toast", {
+            detail: {
+              type: "error",
+              title: t("创建会话失败", "Failed to create session"),
+              description: err?.message || String(err),
+            },
+          })
+        );
+        return null;
+      }
+    }
+
+    const { uploadAttachment } = await import("./lib/agentClient");
+    const result = await uploadAttachment(baseUrl, token, threadId, file);
+    // The file landed in {workspace}/uploads/ — bump the tree version so
+    // RightPanel re-fetches and the file shows up without a manual refresh.
+    setFileTreeVersion((v) => v + 1);
+    return {
+      filename: result.filename,
+      workspacePath: result.workspacePath,
+      size: result.size,
+      contentType: result.contentType,
+    };
+  };
+
   // Send prompt to the CodeEngine agent backend (thread-based, SSE stream).
   const handleSendPrompt = async (
     text: string,
     pills: ContextPill[],
     mode: string,
-    model: string
+    model: string,
+    images?: string[]
   ) => {
+    // Never send while a turn is streaming — the user must stop (打断) first.
+    // Guard applies to every send surface (input box, suggestion cards…);
+    // the backend enforces the same rule with a 409.
+    if (isGenerating) {
+      window.dispatchEvent(
+        new CustomEvent("app:show_toast", {
+          detail: {
+            type: "warning",
+            title: t("正在生成中", "Generating"),
+            description: t(
+              "请先点击停止按钮打断当前回复，再发送新消息。",
+              "Stop the current reply before sending a new message."
+            ),
+            duration: 3000,
+          },
+        })
+      );
+      return;
+    }
+    // Attachments already uploaded into the workspace — embed their paths
+    // into the outgoing text so the agent knows what to read.
+    const fileAttachments = pills
+      .filter((p) => p.type === "file" && p.attachment)
+      .map((p) => p.attachment!);
+    let outgoingText = text;
+    if (fileAttachments.length > 0) {
+      const list = fileAttachments.map((a) => `- ${a.filename}（工作区路径: ${a.workspacePath}）`).join("\n");
+      outgoingText = `${text}\n\n[已上传文件，可用 read_file 读取]\n${list}`;
+    }
+
     const userMsg: ChatMessage = {
       id: Date.now().toString(),
       sender: "user",
@@ -1264,6 +2025,9 @@ export default function App() {
       contextPills: pills,
       mode,
       model,
+      threadId: threadIdRef.current || undefined,
+      images: images && images.length > 0 ? images : undefined,
+      attachments: fileAttachments.length > 0 ? fileAttachments : undefined,
     };
     setMessages((prev) => [...prev, userMsg]);
     setIsGenerating(true);
@@ -1304,6 +2068,7 @@ export default function App() {
 
     const aiMsgId = (Date.now() + 1).toString();
     activeAiMsgIdRef.current = aiMsgId;
+    lastSeqRef.current = 0; // new turn → new event stream
     const aiMsg: ChatMessage = {
       id: aiMsgId,
       sender: "ai",
@@ -1312,6 +2077,7 @@ export default function App() {
       model,
       agentStatus: "thinking",
       isStreaming: true,
+      blocks: [],
     };
     setMessages((prev) => [...prev, aiMsg]);
 
@@ -1322,7 +2088,12 @@ export default function App() {
         const threadName = text.length > 30 ? text.slice(0, 30) + "..." : text;
         const created = await createThread(baseUrl, token, modelId, threadName, activeProjectIdRef.current, approvalPolicy);
         threadId = created.threadId;
-        threadIdRef.current = threadId;
+        applyThreadId(threadId);
+        // Stamp the thread onto the already-rendered user message so its
+        // attachments stay resolvable after later thread switches.
+        setMessages((prev) =>
+          prev.map((m) => (m.id === userMsg.id ? { ...m, threadId } : m))
+        );
         // Notify Sidebar so the new thread appears without a page refresh.
         window.dispatchEvent(
           new CustomEvent("app:thread_created", {
@@ -1332,7 +2103,8 @@ export default function App() {
       }
 
       // 2. Submit the user message (agent runs in the background).
-      await sendMessage(baseUrl, token, threadId, modelId, text, approvalPolicy);
+      const skillIds = pills.filter((p) => p.type === "skill").map((p) => p.id);
+      await sendMessage(baseUrl, token, threadId, modelId, outgoingText, approvalPolicy, skillIds, images);
 
       // 3. Stream agent events and render them onto the active message.
       await streamChat(baseUrl, token, threadId, (ev) => {
@@ -1350,29 +2122,120 @@ export default function App() {
         )
       );
     } catch (err: any) {
-      const msg = err?.message || "Agent request failed";
-      markThreadResolved(threadId);
+      if (err?.name === "AbortError") return; // superseded by a newer stream
+      // Stream-level failure — toast only, never write provider errors into
+      // the chat transcript.
+      window.dispatchEvent(
+        new CustomEvent("app:show_toast", {
+          detail: {
+            type: "error",
+            title: t("生成失败", "Generation Failed"),
+            description: err?.message || t("模型服务暂时不可用，请稍后重试", "Model service unavailable, please retry"),
+            duration: 5000,
+          },
+        })
+      );
+      markThreadResolved(threadIdRef.current || "");
       setMessages((prev) =>
         prev.map((m) =>
           m.id === aiMsgId
-            ? {
-                ...m,
-                text:
-                  m.text + (m.text ? "\n\n" : "") + `> ⚠️ ${msg}`,
-                agentStatus: "completed",
-                isStreaming: false,
-              }
+            ? { ...m, agentStatus: "completed", isStreaming: false }
             : m
         )
       );
     } finally {
-      setIsGenerating(false);
-      activeAiMsgIdRef.current = null;
+      // Only tear down generation state if this stream is still the active
+      // one — handleAskUserSubmit aborts this stream and installs a newer
+      // controller before this finally runs.
+      if (abortControllerRef.current === controller) {
+        setIsGenerating(false);
+        activeAiMsgIdRef.current = null;
+      }
     }
   };
 
   if (!isLoggedIn) {
     return <LoginPage />;
+  }
+
+  // -- Sidepanel compact mode: thin top bar (thread select + bridge dot)
+  // -- + ChatStream + PromptInput, full width. No Sidebar/Editor/RightPanel.
+  if (isSidepanel) {
+    return (
+      <div className="flex flex-col h-screen w-screen overflow-hidden bg-white dark:bg-gray-950 text-gray-900 dark:text-gray-100 font-sans antialiased">
+        <div className="flex items-center gap-2 px-3 h-10 border-b border-gray-200 dark:border-gray-800 bg-gray-50/80 dark:bg-zinc-900/80 shrink-0">
+          <span className="text-xs font-semibold text-gray-500 dark:text-zinc-400 shrink-0 select-none">
+            Code Engine
+          </span>
+          <select
+            value={bridgeThreadId ?? ""}
+            onChange={(e) => {
+              const v = e.target.value;
+              if (v) {
+                handleSelectThread(v);
+              } else {
+                handleNewTask();
+              }
+            }}
+            className="flex-1 min-w-0 text-xs bg-transparent border-none outline-none cursor-pointer truncate text-gray-700 dark:text-zinc-300"
+            title={bridgeThreadId || t("新对话", "New chat")}
+          >
+            <option value="">{t("＋ 新对话（未绑定扩展）", "+ New chat (unbound)")}</option>
+            {sidepanelThreads.map((th) => (
+              <option key={th.id} value={th.id}>
+                {th.name || `${th.id.slice(0, 12)}…`}
+              </option>
+            ))}
+          </select>
+          <span
+            className={`w-2 h-2 rounded-full shrink-0 ${bridgeConnected ? "bg-green-500" : "bg-red-400"}`}
+            title={
+              bridgeConnected
+                ? t("浏览器桥接已连接", "Browser bridge connected")
+                : t("浏览器桥接未连接（扩展未登录或后端不可达）", "Browser bridge disconnected")
+            }
+          />
+        </div>
+        {messages.length === 0 ? (
+          <div className="flex-1 flex flex-col items-center justify-center p-3 min-h-0">
+            <PromptInput
+              onSend={handleSendPrompt}
+              projectName={activeProject.name}
+              branchName={activeProject.branch}
+              selectedModel={selectedModel}
+              onModelChange={setSelectedModel}
+              isGenerating={isGenerating}
+              onStop={handleStopGeneration}
+              onUploadAttachment={handleUploadAttachment}
+            />
+          </div>
+        ) : (
+          <div className="flex-1 flex flex-col min-h-0">
+            <ChatStream
+              messages={messages}
+              isGenerating={isGenerating}
+              onSubmitAnswers={handleAskUserSubmit}
+              pendingApprovals={pendingApprovals}
+              onApproval={handleApproval}
+              onOpenAttachment={handleOpenAttachment}
+            />
+            <div className="p-2 bg-white/90 dark:bg-zinc-950/90 backdrop-blur-xs shrink-0">
+              <PromptInput
+                onSend={handleSendPrompt}
+                projectName={activeProject.name}
+                branchName={activeProject.branch}
+                selectedModel={selectedModel}
+                onModelChange={setSelectedModel}
+                isGenerating={isGenerating}
+                onStop={handleStopGeneration}
+                onUploadAttachment={handleUploadAttachment}
+              />
+            </div>
+          </div>
+        )}
+
+      </div>
+    );
   }
 
   return (
@@ -1466,7 +2329,8 @@ export default function App() {
         onSelectProject={(id) => {
           setMessages([]);
           setOpenTabs([]);
-          threadIdRef.current = null;
+          setActivePlan(null);
+          applyThreadId(null);
           activeProjectIdRef.current = id;
           setActiveProjectId(id);
           if (!isSettingsOpen) {
@@ -1491,7 +2355,8 @@ export default function App() {
           activeProjectId={activeProjectId}
           onSelectProject={(id) => {
             setMessages([]);
-            threadIdRef.current = null;
+            setActivePlan(null);
+            applyThreadId(null);
             activeProjectIdRef.current = id;
             setActiveProjectId(id);
             if (!isSettingsOpen) {
@@ -1590,7 +2455,8 @@ export default function App() {
                                           onClick={() => {
                                             setMessages([]);
                                             setOpenTabs([]);
-                                            threadIdRef.current = null;
+                                            setActivePlan(null);
+                                            applyThreadId(null);
                                             activeProjectIdRef.current = proj.id;
                                             setActiveProjectId(proj.id);
                                             if (!isSettingsOpen) {
@@ -1628,10 +2494,9 @@ export default function App() {
                         branchName={activeProject.branch}
                         selectedModel={selectedModel}
                         onModelChange={setSelectedModel}
-                        selectedMode={selectedMode}
-                        onModeChange={handleModeChange}
                         isGenerating={isGenerating}
                         onStop={handleStopGeneration}
+                        onUploadAttachment={handleUploadAttachment}
                         onSelectRecommendation={(promptText) =>
                           handleSendPrompt(
                             promptText,
@@ -1648,13 +2513,17 @@ export default function App() {
                       <ChatStream
                         messages={messages}
                         isGenerating={isGenerating}
-                        onSelectOption={handleAskUserSubmit}
+                        onSubmitAnswers={handleAskUserSubmit}
                         pendingApprovals={pendingApprovals}
                         onApproval={handleApproval}
                         onOpenFile={handleOpenFileFromCard}
                         onKeepFile={handleKeepFile}
                         onRevertFile={handleRevertFile}
+                        onOpenAttachment={handleOpenAttachment}
                       />
+                      {activePlan && (
+                        <PlanProgressCard plan={activePlan.steps} explanation={activePlan.explanation} />
+                      )}
                       <div className="p-3 bg-[#ffffff]/90 dark:bg-zinc-950/90 backdrop-blur-xs">
                         <PromptInput
                           onSend={handleSendPrompt}
@@ -1662,10 +2531,9 @@ export default function App() {
                           branchName={activeProject.branch}
                           selectedModel={selectedModel}
                           onModelChange={setSelectedModel}
-                          selectedMode={selectedMode}
-                          onModeChange={handleModeChange}
                           isGenerating={isGenerating}
                           onStop={handleStopGeneration}
+                          onUploadAttachment={handleUploadAttachment}
                         />
                       </div>
                     </div>
@@ -1736,6 +2604,54 @@ export default function App() {
                     onCloseEditor={() => setOpenTabs([])}
                     onKeepFile={handleKeepFile}
                     onRevertFile={handleRevertFile}
+                    onDownloadTab={(tab) =>
+                      handleDownloadAttachment(
+                        tab.path.startsWith("attachment:") ? tab.path.slice("attachment:".length) : undefined
+                      )
+                    }
+                    onOnlyOfficeUnavailable={(tabPath) => {
+                      // DS 挂了/api.js 加载失败：剥掉编辑器配置，回退 OfficeCLI 静态预览
+                      const baseUrl = backendApiUrl || "https://agent.hery.cloud";
+                      const token = user?.token;
+                      void (async () => {
+                        if (!token) return;
+                        setOpenTabs((cur) =>
+                          cur.map((t) =>
+                            t.path === tabPath
+                              ? { ...t, onlyofficeConfig: undefined, content: "// 正在渲染文档…", readOnly: true }
+                              : t
+                          )
+                        );
+                        try {
+                          if (tabPath.startsWith("attachment:")) {
+                            const { previewAttachmentHtml } = await import("./lib/agentClient");
+                            const wsPath = tabPath.slice("attachment:".length);
+                            const tid = threadIdRef.current;
+                            if (!tid) return;
+                            const { html } = await previewAttachmentHtml(baseUrl, token, tid, wsPath);
+                            if (html) {
+                              setOpenTabs((cur) =>
+                                cur.map((t) => (t.path === tabPath ? { ...t, htmlContent: html } : t))
+                              );
+                            }
+                          } else if (activeProjectId) {
+                            const { previewProjectFile } = await import("./lib/projectApi");
+                            const { html } = await previewProjectFile(baseUrl, token, activeProjectId, tabPath);
+                            if (html) {
+                              setOpenTabs((cur) =>
+                                cur.map((t) => (t.path === tabPath ? { ...t, htmlContent: html } : t))
+                              );
+                            }
+                          }
+                        } catch {
+                          // OfficeCLI also unavailable — leave the placeholder
+                        }
+                      })();
+                    }}
+                    onOnlyOfficeSaved={() => {
+                      // DS 保存回写已落盘（后端无 SSE 推送），主动刷文件树
+                      setFileTreeVersion((v) => v + 1);
+                    }}
                     projectId={activeProjectId}
                   />
                 </motion.div>
@@ -1770,6 +2686,7 @@ export default function App() {
               projectName={activeProject.name}
               projectId={activeProjectId || undefined}
               width={rightPanelWidth}
+              fileTreeVersion={fileTreeVersion}
             />
           </div>
 
@@ -1794,10 +2711,12 @@ export default function App() {
             isOpen={terminalOpen}
             onClose={() => setTerminalOpen(false)}
             projectName={activeProject.name}
-            branchName={activeProject.branch}
+            branchName={activeProject.branch || activeProject.gitBranch || "main"}
+            projectId={activeProject.id}
           />
         </div>
       </div>
+
     </div>
   );
 }

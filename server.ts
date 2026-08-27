@@ -1,5 +1,7 @@
 import express from "express";
+import http from "http";
 import path from "path";
+import fs from "fs";
 import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
@@ -9,6 +11,142 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = parseInt(process.env.PORT || "3000", 10);
+
+// ── OnlyOffice Document Server 同源代理 ────────────────────────────────────
+// 浏览器经 https://code.hery.cloud 访问，直连 http://127.0.0.1:8900 会被
+// 混合内容拦截 —— 把 DS 的根绝对路径前缀在本源转发到 DS。必须注册在
+// express.json() 之前，DS 的 JSON POST 体要原样流过，不能被解析再序列化。
+// DS 9.4 静态资源会 302 到 /{version}-{cache_tag}{path} 版本化前缀，且
+// 重定向 Location 的 scheme/host 取自 X-Forwarded-Proto / Host —— 转发
+// 浏览器的头，否则 Location 会变成 http://127.0.0.1:8900/... 死链。
+const DS_UPSTREAM = new URL(process.env.ONLYOFFICE_UPSTREAM || "http://127.0.0.1:8900");
+const DS_PREFIXES = [
+  "/web-apps", "/sdkjs", "/sdkjs-plugins", "/fonts", "/dictionaries",
+  "/cache", "/doc", "/coauthoring", "/thirdparty", "/spellchecker", "/welcome",
+];
+const DS_EXACT = ["/ConvertService.ashx", "/document_editor_service_worker.js"];
+// e.g. /9.4.0-c40fa7733b4c3e6c276eea25924b4c9d/web-apps/...
+const DS_VERSIONED = /^\/\d+\.\d+\.\d+-[A-Za-z0-9_]+(?=[/?#])/;
+
+function isDsPath(pathname: string): boolean {
+  if (pathname.startsWith("/api")) return false; // never shadow the app's own API
+  if (DS_EXACT.some((p) => pathname === p)) return true;
+  if (DS_PREFIXES.some((p) => pathname === p || pathname.startsWith(p + "/"))) return true;
+  return DS_VERSIONED.test(pathname);
+}
+
+if (process.env.ONLYOFFICE_PROXY !== "off") {
+  app.use((req, res, next) => {
+    if (!isDsPath(req.url.split("?")[0])) return next();
+    const host = req.headers.host || DS_UPSTREAM.host;
+    const xfProto = req.headers["x-forwarded-proto"];
+    const socket = req.socket as import("tls").TLSSocket;
+    // IP 字面量 host = frp 裸隧道直连（无 TLS 终止），按 http；域名仍兜底 https（code.hery.cloud 反代）
+    const hostNoPort = host.replace(/:\d+$/, "");
+    const isIpHost = /^(\d{1,3}\.){3}\d{1,3}$/.test(hostNoPort) || hostNoPort.startsWith("[");
+    const proto =
+      (typeof xfProto === "string" && xfProto) ||
+      (socket.encrypted ? "https" : (isIpHost || /^(localhost|127\.|0\.0\.0\.0|\[::1\])/.test(host)) ? "http" : "https");
+    const headers: http.IncomingHttpHeaders = { ...req.headers };
+    delete headers["connection"];
+    delete headers["keep-alive"];
+    delete headers["upgrade"];
+    headers["host"] = host;
+    headers["x-forwarded-host"] = host;
+    headers["x-forwarded-proto"] = proto;
+    const up = http.request(
+      {
+        protocol: DS_UPSTREAM.protocol,
+        hostname: DS_UPSTREAM.hostname,
+        port: DS_UPSTREAM.port,
+        method: req.method,
+        path: req.url,
+        headers: headers as http.OutgoingHttpHeaders,
+      },
+      (ur) => {
+        const h = { ...ur.headers };
+        delete h["connection"];
+        delete h["keep-alive"];
+        delete h["transfer-encoding"];
+        res.writeHead(ur.statusCode || 502, h);
+        ur.pipe(res);
+      }
+    );
+    up.setTimeout(300_000, () => up.destroy()); // DS 长轮询需要长超时
+    up.on("error", (e) => {
+      if (!res.headersSent) res.status(502).end(`DS proxy error: ${e.message}`);
+      else res.end();
+    });
+    req.pipe(up);
+    res.on("close", () => up.destroy());
+  });
+}
+
+// ── DS WebSocket 代理 ───────────────────────────────────────────────────────
+// 编辑器与 docservice 的通信默认走 ws:///doc/{docId}/c/{user}/{conn}/websocket。
+// v1 没挂 upgrade 处理器时浏览器拿不到 101,编辑器降级长轮询 —— 文档打开的
+// auth→join→open 握手每一跳都多等一轮 HTTP 轮询,本地也有可观的秒级延迟。
+// 这里把 DS 路径的 upgrade 原样转发给 DS 并做双向裸管道。Vite HMR 在同一
+// server 上监听 upgrade,按 sec-websocket-protocol === "vite-hmr" 自行过滤,
+// 非 DS 路径直接 return 让 Vite 处理,互不干扰。
+function attachDsWebSocketProxy(server: http.Server): void {
+  if (process.env.ONLYOFFICE_PROXY === "off") return;
+  server.on("upgrade", (req, socket, head) => {
+    const pathname = (req.url || "").split("?")[0];
+    if (!isDsPath(pathname)) return; // Vite HMR / others
+    const host = req.headers.host || DS_UPSTREAM.host;
+    const headers: http.IncomingHttpHeaders = { ...req.headers };
+    headers["host"] = host;
+    headers["x-forwarded-host"] = host;
+    // IP 字面量 host = frp 裸隧道直连,按 http;域名按 https(与上面 HTTP 代理一致)
+    const hostNoPort = host.replace(/:\d+$/, "");
+    const isIpHost = /^(\d{1,3}\.){3}\d{1,3}$/.test(hostNoPort) || hostNoPort.startsWith("[");
+    headers["x-forwarded-proto"] =
+      (typeof req.headers["x-forwarded-proto"] === "string" && req.headers["x-forwarded-proto"]) ||
+      (isIpHost || /^(localhost|127\.|0\.0\.0\.0|\[::1\])/.test(host) ? "http" : "https");
+    const up = http.request({
+      protocol: DS_UPSTREAM.protocol,
+      hostname: DS_UPSTREAM.hostname,
+      port: DS_UPSTREAM.port,
+      method: req.method,
+      path: req.url,
+      headers: headers as http.OutgoingHttpHeaders, // 透传 Connection/Upgrade/Sec-WebSocket-*
+    });
+    up.on("upgrade", (ur, us, uhead) => {
+      const statusLine = `HTTP/1.1 ${ur.statusCode} ${ur.statusMessage || ""}\r\n`;
+      const headerLines = Object.entries(ur.headers)
+        .filter(([, v]) => v !== undefined)
+        .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(", ") : v}`)
+        .join("\r\n");
+      socket.write(statusLine + headerLines + "\r\n\r\n");
+      if (uhead?.length) socket.write(uhead);
+      us.pipe(socket);
+      socket.pipe(us);
+      const kill = () => {
+        us.destroy();
+        socket.destroy();
+      };
+      us.on("error", kill);
+      socket.on("error", kill);
+      us.on("close", () => socket.destroy());
+      socket.on("close", () => us.destroy());
+    });
+    // DS 拒绝升级(如非法 session 路径)时回的是普通 HTTP 响应而非 101 ——
+    // 不回写浏览器侧会挂死,还以为 WS 不可用。
+    up.on("response", (ur) => {
+      const statusLine = `HTTP/1.1 ${ur.statusCode} ${ur.statusMessage || ""}\r\n`;
+      const headerLines = Object.entries(ur.headers)
+        .filter(([, v]) => v !== undefined)
+        .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(", ") : v}`)
+        .join("\r\n");
+      socket.write(statusLine + headerLines + "\r\n\r\n");
+      ur.pipe(socket);
+    });
+    up.on("error", () => socket.destroy());
+    if (head?.length) up.write(head);
+    up.end();
+  });
+}
 
 app.use(express.json({ limit: "10mb" }));
 
@@ -670,25 +808,47 @@ drwxr-xr-x  20 heruyi  staff   640B fe
   res.json({ output, timestamp: new Date().toISOString() });
 });
 
+// [临时] 浏览器桥接扩展下载 — 发送上级目录打好的 zip(重新打包后即为最新)
+app.get("/download/code-engine-extension.zip", (_req, res) => {
+  const zipPath = path.resolve(__dirname, "..", "code-engine-extension.zip");
+  if (!fs.existsSync(zipPath)) {
+    return res.status(404).send("code-engine-extension.zip 不存在,请先重新打包");
+  }
+  res.setHeader("Content-Type", "application/zip");
+  res.setHeader("Content-Disposition", 'attachment; filename="code-engine-extension.zip"');
+  res.sendFile(zipPath);
+});
+
 // Start Vite server in dev or serve dist in production
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
+    // Share one HTTP server for both express and Vite's HMR websocket
+    // (hmr.server). Otherwise Vite opens a standalone ws server on its own
+    // port (default 24678), which reverse proxies serving this app (e.g.
+    // code.hery.cloud) don't forward — the browser then fails to connect
+    // HMR with "WebSocket closed without opened".
+    const server = http.createServer(app);
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, hmr: { server } },
       appType: "spa",
     });
     app.use(vite.middlewares);
+    attachDsWebSocketProxy(server);
+    server.listen(PORT, "0.0.0.0", () => {
+      console.log(`CodeX IDE Server running on http://localhost:${PORT}`);
+    });
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
     app.get("*", (_req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
     });
+    const server = http.createServer(app);
+    attachDsWebSocketProxy(server);
+    server.listen(PORT, "0.0.0.0", () => {
+      console.log(`CodeX IDE Server running on http://localhost:${PORT}`);
+    });
   }
-
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`CodeX IDE Server running on http://localhost:${PORT}`);
-  });
 }
 
 startServer();

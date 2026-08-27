@@ -187,10 +187,10 @@ export const ToolExecutionGroup: React.FC<ToolExecutionGroupProps> = ({
             {tools.map((tool) => {
               const info = parseToolInfo(tool);
               return (
-                <div
-                  key={tool.id}
-                  className="flex items-center gap-2 py-1 px-2 rounded-lg bg-gray-50/80 dark:bg-zinc-900/60 border border-gray-200/60 dark:border-zinc-800/60 hover:border-gray-300 dark:hover:border-zinc-700 transition-colors text-xs text-gray-600 dark:text-zinc-400"
-                >
+                <React.Fragment key={tool.id}>
+                  <div
+                    className="flex items-center gap-2 py-1 px-2 rounded-lg bg-gray-50/80 dark:bg-zinc-900/60 border border-gray-200/60 dark:border-zinc-800/60 hover:border-gray-300 dark:hover:border-zinc-700 transition-colors text-xs text-gray-600 dark:text-zinc-400"
+                  >
                   {/* Status / Icon */}
                   {tool.status === "running" ? (
                     <Loader2 className="w-3.5 h-3.5 text-indigo-500 dark:text-indigo-400 animate-spin shrink-0" />
@@ -273,6 +273,7 @@ export const ToolExecutionGroup: React.FC<ToolExecutionGroupProps> = ({
                       : tool.contentDelta}
                   </div>
                 )}
+                </React.Fragment>
               );
             })}
           </div>

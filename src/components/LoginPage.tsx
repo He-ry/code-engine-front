@@ -432,8 +432,8 @@ export const LoginPage: React.FC = () => {
 
       if (loginRes.ok) {
         const loginData = await loginRes.json();
-        const token = loginData.access_token;
-        const refreshToken = loginData.refresh_token;
+        const token = loginData.data?.access_token || loginData.access_token;
+        const refreshToken = loginData.data?.refresh_token || loginData.refresh_token;
 
         const meRes = await fetch(`${baseUrl}/api/auth/me`, {
           headers: { "Authorization": `Bearer ${token}` }
@@ -488,8 +488,8 @@ export const LoginPage: React.FC = () => {
 
           if (loginRes2.ok) {
             const loginData2 = await loginRes2.json();
-            const token2 = loginData2.access_token;
-            const refreshToken2 = loginData2.refresh_token;
+            const token2 = loginData2.data?.access_token || loginData2.access_token;
+            const refreshToken2 = loginData2.data?.refresh_token || loginData2.refresh_token;
 
             // Fetch real profile from /api/auth/me
             let profile: UserProfile = {

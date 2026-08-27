@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import {
   Check,
@@ -14,22 +14,37 @@ import {
   Wrench,
   Bot,
 } from "lucide-react";
-import { AUTO_ACCEPT_MODES, MODEL_OPTIONS, MENU_ATTACHMENTS, SKILLS_LIST, SUBAGENTS_LIST } from "../data/mockData";
+import { AUTO_ACCEPT_MODES, MODEL_OPTIONS, MENU_ATTACHMENTS, SUBAGENTS_LIST } from "../data/mockData";
 import { ContextPill } from "../types";
 import { useSettings } from "../context/SettingsContext";
+import { getUserSkills, UserSkill } from "../lib/skillApi";
 
 interface PlusMenuProps {
   onSelect: (pill: ContextPill) => void;
   onSelectSkill?: (skillPill: ContextPill) => void;
+  /** Trigger the real image upload flow (owned by PromptInput). */
+  onUploadImage?: () => void;
+  /** Trigger the real file attachment upload flow (owned by PromptInput). */
+  onUploadFile?: () => void;
   onClose: () => void;
 }
 
-export const PlusMenu: React.FC<PlusMenuProps> = ({ onSelect, onSelectSkill, onClose }) => {
-  const { t } = useSettings();
+export const PlusMenu: React.FC<PlusMenuProps> = ({ onSelect, onSelectSkill, onUploadImage, onUploadFile, onClose }) => {
+  const { t, backendApiUrl, user } = useSettings();
   const [hoveredSubmenu, setHoveredSubmenu] = useState<"skills" | "subagents" | null>(null);
-  const [hoveredSkill, setHoveredSkill] = useState<(typeof SKILLS_LIST)[0] | null>(null);
+  const [hoveredSkill, setHoveredSkill] = useState<UserSkill | null>(null);
   const [hoveredSubagent, setHoveredSubagent] = useState<(typeof SUBAGENTS_LIST)[0] | null>(null);
+  const [skills, setSkills] = useState<UserSkill[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const baseUrl = backendApiUrl || "https://agent.hery.cloud";
+    const token = user?.token || "";
+    if (!token) return;
+    getUserSkills(baseUrl, token)
+      .then(setSkills)
+      .catch(() => {});
+  }, [backendApiUrl, user?.token]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -91,7 +106,17 @@ export const PlusMenu: React.FC<PlusMenuProps> = ({ onSelect, onSelectSkill, onC
           }}
           onClick={() => {
             if (item.id === "file") {
-              fileInputRef.current?.click();
+              // Real upload flow when wired; the internal hidden input is
+              // only the legacy decorative-pill fallback.
+              if (onUploadFile) {
+                onUploadFile();
+              } else {
+                fileInputRef.current?.click();
+              }
+              onClose();
+            } else if (item.id === "img") {
+              onUploadImage?.();
+              onClose();
             } else {
               onSelect({ id: item.id, name: t(item.label, item.enLabel || item.label), type: item.id as any });
               onClose();
@@ -132,7 +157,7 @@ export const PlusMenu: React.FC<PlusMenuProps> = ({ onSelect, onSelectSkill, onC
               className="absolute left-full bottom-0 -ml-1 w-52 bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-gray-200 dark:border-gray-700 py-1 z-50"
               onMouseLeave={() => setHoveredSkill(null)}
             >
-              {SKILLS_LIST.map((skill) => (
+              {skills.map((skill) => (
                 <div
                   key={skill.id}
                   className="relative"
@@ -167,15 +192,11 @@ export const PlusMenu: React.FC<PlusMenuProps> = ({ onSelect, onSelectSkill, onC
                   >
                     <div className="flex items-center justify-between mb-1.5 pb-1 border-b border-gray-100 dark:border-gray-700">
                       <span className="font-semibold text-xs text-gray-900 dark:text-gray-100">{t(hoveredSkill.name, hoveredSkill.enName)}</span>
-                      <span className="text-[10px] text-gray-400">{t(hoveredSkill.category, hoveredSkill.enCategory)}</span>
+                      <span className="text-[10px] text-gray-400">{hoveredSkill.category}</span>
                     </div>
-                    <p className="text-[11px] text-gray-600 dark:text-gray-300 leading-normal mb-2">
-                      {t(hoveredSkill.desc, hoveredSkill.enDesc)}
+                    <p className="text-[11px] text-gray-600 dark:text-gray-300 leading-normal">
+                      {t(hoveredSkill.description, hoveredSkill.enDescription)}
                     </p>
-                    <div className="text-[10px] text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900 p-1.5 rounded border border-gray-100 dark:border-gray-700">
-                      <span className="text-gray-400">{t("示例：", "Example: ")}</span>
-                      {t(hoveredSkill.example, hoveredSkill.enExample)}
-                    </div>
                   </motion.div>
                 )}
               </AnimatePresence>

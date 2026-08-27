@@ -10,6 +10,7 @@ import {
   ChevronRight,
   Check,
   Code2,
+  Download,
   Lock,
   Unlock,
   ArrowUp,
@@ -34,6 +35,7 @@ import {
   Home,
 } from "lucide-react";
 import { OpenTab } from "../types";
+import OnlyOfficeEditor from "./OnlyOfficeEditor";
 
 // ── highlight.js syntax highlighting ──
 import hljs from "highlight.js/lib/core";
@@ -90,6 +92,13 @@ interface CodeEditorProps {
   onCloseEditor: () => void;
   onKeepFile?: (path: string) => void;
   onRevertFile?: (path: string, originalContent: string | null) => void;
+  /** Download the source file of a read-only preview tab (attachments). */
+  onDownloadTab?: (tab: OpenTab) => void;
+  /** OnlyOffice DS unreachable — strip the editor config and re-run the
+   *  OfficeCLI HTML preview fallback for that tab. */
+  onOnlyOfficeUnavailable?: (tabPath: string) => void;
+  /** OnlyOffice save-back landed on disk — refresh file trees etc. */
+  onOnlyOfficeSaved?: (tabPath: string) => void;
   projectId?: string;
 }
 
@@ -108,6 +117,9 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   onCloseEditor,
   onKeepFile,
   onRevertFile,
+  onDownloadTab,
+  onOnlyOfficeUnavailable,
+  onOnlyOfficeSaved,
   projectId,
 }) => {
   const { t, backendApiUrl, user } = useSettings();
@@ -123,8 +135,9 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       case "js": case "jsx": case "mjs": case "cjs": return "javascript";
       case "json": return "json";
       case "yaml": case "yml": return "yaml";
-      case "css": case "scss": case "less": return "css";
-      case "html": case "htm": case "xml": case "svg": return "markup";
+      case "css": case "less": return "css";
+      case "scss": return "scss";
+      case "html": case "htm": case "xml": case "svg": return "xml";
       case "md": case "markdown": return "markdown";
       case "sh": case "bash": case "zsh": return "bash";
       case "sql": return "sql";
@@ -137,7 +150,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       case "php": return "php";
       case "swift": return "swift";
       case "rb": return "ruby";
-      case "dockerfile": return "docker";
+      case "dockerfile": case "docker": return "dockerfile";
       default: return "javascript";
     }
   };
@@ -357,13 +370,10 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     );
   }
 
-  // Construct breadcrumb path
-  let breadcrumbs = isBrowserTab
-    ? ["blackbox-engine", t("浏览器", "Browser"), activeTab.content || "https://example.com"]
+  // Construct breadcrumb path — use the real file path, no artificial prefix
+  const breadcrumbs = isBrowserTab
+    ? [t("浏览器", "Browser"), activeTab.content || "https://example.com"]
     : activeTab.path.split("/");
-  if (!isBrowserTab && breadcrumbs[0] !== "blackbox-engine") {
-    breadcrumbs = ["blackbox-engine", ...breadcrumbs];
-  }
 
   const lines = (activeTab.content || "").split("\n");
 
@@ -390,30 +400,93 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
 
   const symbols = parseSymbols();
 
-  // Force read-only while a pending change is under review
+  // Keep the read-only lock separate from review — user can edit even while
+  // a pending change is under review so they can adjust the proposed content.
   const isReviewing = !!activeTab?.pendingChange && !activeTab.pendingChange.isConfirmed;
-  const effectiveReadOnly = isReadOnly || isReviewing;
+  const isPreviewTab = !!activeTab?.readOnly;
+  const effectiveReadOnly = isPreviewTab || isReadOnly;
+
+  // 非代码类标签(OnlyOffice / HTML 预览 / PDF / 图片 / 浏览器)不展示代码编辑工具,
+  // 只保留 刷新 / 独立卡片预览 / 最大化(关闭走标签条上的 X)。
+  const isRichTab =
+    isImageFile ||
+    isBrowserTab ||
+    !!activeTab?.onlyofficeConfig ||
+    activeTab?.pdfUrl !== undefined ||
+    activeTab?.htmlContent !== undefined;
 
   // ── highlight.js-based multi-language syntax highlighter ──
+  // Highlights the entire file at once so multi-line tokens (comments,
+  // strings, etc.) are coloured correctly, then splits into lines while
+  // tracking open/close spans across line boundaries.
   const renderHighlightedLines = (codeLines: string[]) => {
     const fileName = activeTab?.name;
     const lang = getLanguage(fileName);
     const langOk = hljs.getLanguage(lang) !== undefined;
+    const fullCode = codeLines.join("\n");
 
-    return codeLines.map((line, index) => {
+    // 1. Highlight everything in one shot
+    let highlightedHtml = "";
+    if (fullCode && langOk) {
+      try {
+        const result = hljs.highlight(fullCode, { language: lang });
+        highlightedHtml = result.value;
+      } catch {
+        highlightedHtml = fullCode.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      }
+    } else if (fullCode) {
+      highlightedHtml = fullCode.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
+    // 2. Split the highlighted HTML into lines, tracking span state.
+    //    Walk character-by-character to correctly handle ANY < in the
+    //    highlighted output (both hljs <span> tags and escaped &lt; etc.).
+    const lineParts: string[] = [];
+    const openSpans: string[] = [];
+    let currentPart = "";
+    let i = 0;
+
+    while (i < highlightedHtml.length) {
+      if (highlightedHtml.substring(i).startsWith("</span>")) {
+        currentPart += "</span>";
+        openSpans.pop();
+        i += 7;
+      } else if (highlightedHtml.substring(i).startsWith("<span")) {
+        const end = highlightedHtml.indexOf(">", i);
+        if (end !== -1) {
+          const tag = highlightedHtml.substring(i, end + 1);
+          currentPart += tag;
+          openSpans.push(tag);
+          i = end + 1;
+        } else {
+          // Malformed span — treat as text
+          currentPart += highlightedHtml[i];
+          i += 1;
+        }
+      } else if (highlightedHtml[i] === "\n") {
+        // Close all currently-open spans, record the line, then reopen for next line
+        if (openSpans.length > 0) {
+          currentPart += "</span>".repeat(openSpans.length);
+        }
+        lineParts.push(currentPart);
+        currentPart = openSpans.join("");
+        i += 1;
+      } else {
+        currentPart += highlightedHtml[i];
+        i += 1;
+      }
+    }
+    // Last line (may not end with \n)
+    lineParts.push(currentPart);
+
+    // 3. Pad to match the actual number of code lines
+    while (lineParts.length < codeLines.length) {
+      lineParts.push("&nbsp;");
+    }
+
+    return lineParts.map((lineHtml, index) => {
       const lineNum = index + 1;
       const isCurrentLine = lineNum === activeLine;
-      let highlighted = "&nbsp;";
-      if (line && langOk) {
-        try {
-          const result = hljs.highlight(line, { language: lang });
-          highlighted = result.value;
-        } catch {
-          highlighted = line.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-        }
-      } else if (line) {
-        highlighted = line.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-      }
 
       // GitHub-style green bg for pending review (new file / added lines)
       const reviewBg = isReviewing
@@ -429,9 +502,9 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
             isCurrentLine ? "bg-blue-50/80 dark:bg-[#21262d]/80 border-l-2 border-blue-600 dark:border-[#58a6ff] -ml-[2px]" : reviewBg
           }`}
         >
-          {line ? (
+          {lineHtml ? (
             <span
-              dangerouslySetInnerHTML={{ __html: highlighted }}
+              dangerouslySetInnerHTML={{ __html: lineHtml }}
             />
           ) : (
             <span className="inline-block w-full">&nbsp;</span>
@@ -459,8 +532,12 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
 
   return (
     <div
-      className={`flex-1 flex flex-col h-full bg-white dark:bg-[#0b0b0b] font-sans select-none min-w-0 relative overflow-hidden transition-all ${
-        isMaximized ? "fixed inset-0 z-50 bg-white dark:bg-[#0b0b0b]" : ""
+      // NOTE: `relative` (normal) and `fixed` (maximized) must stay mutually
+      // exclusive — Tailwind's stylesheet defines .relative AFTER .fixed, so
+      // having both classes on the element leaves `relative` winning and the
+      // fullscreen overlay silently never applies.
+      className={`flex flex-col h-full bg-white dark:bg-[#0b0b0b] font-sans select-none min-w-0 overflow-hidden transition-all ${
+        isMaximized ? "fixed inset-0 z-50" : "relative flex-1"
       }`}
     >
       {/* ── highlight.js GitHub-style theme (light & dark) ── */}
@@ -568,26 +645,28 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
             ))}
           </div>
 
-          {isDiffMode && (
+          {isDiffMode && !isRichTab && (
             <span className="text-[10px] bg-blue-100 dark:bg-blue-900/60 text-blue-600 dark:text-blue-300 px-1.5 py-0.5 rounded font-mono shrink-0">
               Diff HEAD ↔ Working Tree
             </span>
           )}
 
-          <button
-            onClick={() => {
-              setIsReadOnly(!isReadOnly);
-              showToast(isReadOnly ? t("已切换至可编辑模式", "Editable mode enabled") : t("已切换至只读保护模式", "Read-only mode enabled"));
-            }}
-            className="p-1 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded transition-colors shrink-0"
-            title={isReadOnly ? t("解锁编辑", "Unlock Editing") : t("锁住保护", "Lock Protection")}
-          >
-            {isReadOnly ? (
-              <Lock className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-            ) : (
-              <Unlock className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 shrink-0" />
-            )}
-          </button>
+          {!isRichTab && (
+            <button
+              onClick={() => {
+                setIsReadOnly(!isReadOnly);
+                showToast(isReadOnly ? t("已切换至可编辑模式", "Editable mode enabled") : t("已切换至只读保护模式", "Read-only mode enabled"));
+              }}
+              className="p-1 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded transition-colors shrink-0"
+              title={isReadOnly ? t("解锁编辑", "Unlock Editing") : t("锁住保护", "Lock Protection")}
+            >
+              {isReadOnly ? (
+                <Lock className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+              ) : (
+                <Unlock className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 shrink-0" />
+              )}
+            </button>
+          )}
         </div>
 
         {/* Pending change keep/revert buttons (from write_file) */}
@@ -614,10 +693,21 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
 
         {/* Right Action Control Buttons & Cursor Stats */}
         <div className="flex items-center gap-1.5 text-gray-500 dark:text-zinc-400 shrink-0 relative">
-          <div className="hidden sm:flex items-center gap-2 text-[10px] text-gray-400 dark:text-zinc-500 font-mono mr-2 border-r border-gray-200 dark:border-zinc-800 pr-2">
-            <span>{t(`行 ${activeLine}, 列 ${activeCol}`, `Ln ${activeLine}, Col ${activeCol}`)}</span>
-            <span>{t(`${lines.length} 行`, `${lines.length} lines`)}</span>
-          </div>
+          {isPreviewTab && !isRichTab && onDownloadTab && activeTab && (
+            <button
+              onClick={() => onDownloadTab(activeTab)}
+              className="p-1 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded transition-colors shrink-0"
+              title={t("下载原图", "Download Original File")}
+            >
+              <Download className="w-3.5 h-3.5" />
+            </button>
+          )}
+          {!isRichTab && (
+            <div className="hidden sm:flex items-center gap-2 text-[10px] text-gray-400 dark:text-zinc-500 font-mono mr-2 border-r border-gray-200 dark:border-zinc-800 pr-2">
+              <span>{t(`行 ${activeLine}, 列 ${activeCol}`, `Ln ${activeLine}, Col ${activeCol}`)}</span>
+              <span>{t(`${lines.length} 行`, `${lines.length} lines`)}</span>
+            </div>
+          )}
 
           {/* Refresh File */}
           <button
@@ -628,6 +718,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
             <RotateCw className="w-3.5 h-3.5" />
           </button>
 
+          {!isRichTab && (
+            <>
           {/* Jump Up */}
           <button
             onClick={() => handleNavigateLine("up")}
@@ -761,6 +853,9 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
             )}
           </div>
 
+            </>
+          )}
+
           {/* Standalone Modal Popout */}
           <button
             onClick={() => setIsPopoutOpen(true)}
@@ -782,14 +877,16 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
             {isMaximized ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
           </button>
 
-          {/* Close Editor / Tab */}
-          <button
-            onClick={() => onCloseTab(activeTab.path)}
-            className="p-1 hover:bg-rose-100 dark:hover:bg-rose-950 rounded transition-colors cursor-pointer text-gray-500 hover:text-rose-600 dark:hover:text-rose-400"
-            title={t("关闭当前文件", "Close File")}
-          >
-            <X className="w-3.5 h-3.5" />
-          </button>
+          {/* Close Editor / Tab — 非代码标签走标签条上的 X,这里不重复放 */}
+          {!isRichTab && (
+            <button
+              onClick={() => onCloseTab(activeTab.path)}
+              className="p-1 hover:bg-rose-100 dark:hover:bg-rose-950 rounded transition-colors cursor-pointer text-gray-500 hover:text-rose-600 dark:hover:text-rose-400"
+              title={t("关闭当前文件", "Close File")}
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
       </div>
 
@@ -1048,6 +1145,37 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
           <>
             {/* Primary Code Editor */}
             <div className="flex-1 flex min-h-0 relative overflow-hidden">
+              {/* OnlyOffice interactive editor (edit + save-back). Takes
+                  precedence over the static HTML preview. */}
+              {activeTab.onlyofficeConfig ? (
+                <div className="flex-1 min-h-0 bg-white dark:bg-zinc-900">
+                  <OnlyOfficeEditor
+                    config={activeTab.onlyofficeConfig.config}
+                    onUnavailable={() => onOnlyOfficeUnavailable?.(activeTab.path)}
+                    onSaved={() => onOnlyOfficeSaved?.(activeTab.path)}
+                  />
+                </div>
+              ) : activeTab.htmlContent !== undefined ? (
+                <div className="flex-1 min-h-0 bg-white dark:bg-zinc-900">
+                  <iframe
+                    srcDoc={activeTab.htmlContent}
+                    sandbox=""
+                    title={activeTab.name}
+                    className="w-full h-full border-0 block"
+                  />
+                </div>
+              ) : activeTab.pdfUrl !== undefined ? (
+                <div className="flex-1 min-h-0 bg-white dark:bg-zinc-900">
+                  {/* Browser-native PDF viewer (Chrome/Edge/Firefox built-in).
+                      No sandbox attr — the PDF viewer needs it removed. */}
+                  <iframe
+                    src={activeTab.pdfUrl}
+                    title={activeTab.name}
+                    className="w-full h-full border-0 block"
+                  />
+                </div>
+              ) : (
+              <>
               {/* Line Numbers Gutter */}
               <div
                 ref={gutterRef}
@@ -1104,6 +1232,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
                   }}
                 />
               </div>
+              </>
+              )}
             </div>
 
             {/* Secondary Split Editor Panel */}
@@ -1177,10 +1307,12 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
               <div className="flex items-center gap-2">
                 <FileCode className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
                 <span className="font-semibold text-xs sm:text-sm text-gray-800 dark:text-zinc-200 font-mono">
-                  {t("独立代码视图", "Standalone Code View")}
+                  {isRichTab ? t("独立预览视图", "Standalone Preview") : t("独立代码视图", "Standalone Code View")}
                 </span>
               </div>
               <div className="flex items-center gap-2">
+                {!isRichTab && (
+                  <>
                 <button
                   onClick={handleCopyCode}
                   className="px-2.5 py-1 bg-white hover:bg-gray-100 text-gray-800 dark:bg-zinc-800 dark:hover:bg-zinc-700 dark:text-zinc-100 border border-gray-300 dark:border-zinc-700 text-xs font-medium rounded flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs mr-2"
@@ -1213,6 +1345,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
                 >
                   <ExternalLink className="w-4 h-4" />
                 </button>
+                  </>
+                )}
                 <button
                   onClick={() => setIsMaximized(!isMaximized)}
                   className="p-1.5 hover:bg-gray-200 dark:hover:bg-zinc-800 rounded text-gray-500 hover:text-gray-800 dark:hover:text-zinc-200 transition-colors cursor-pointer"
@@ -1267,8 +1401,54 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
               </div>
             )}
 
-            {/* Modal Editor Canvas Body with Line Numbers */}
+            {/* Modal Canvas Body — 富内容标签渲染对应预览,代码标签渲染行号+高亮 */}
             <div className="flex-1 flex min-h-0 bg-white dark:bg-[#0a0a0a] relative overflow-hidden">
+              {isRichTab ? (
+                <div className="flex-1 min-h-0 flex items-center justify-center bg-[#fafafa] dark:bg-[#0b0b0b]">
+                  {activeTab.onlyofficeConfig ? (
+                    <div className="flex-1 h-full bg-white dark:bg-zinc-900">
+                      <OnlyOfficeEditor
+                        config={activeTab.onlyofficeConfig.config}
+                        onUnavailable={() => onOnlyOfficeUnavailable?.(activeTab.path)}
+                        onSaved={() => onOnlyOfficeSaved?.(activeTab.path)}
+                      />
+                    </div>
+                  ) : isImageFile ? (
+                    imageDataUrl ? (
+                      <img
+                        src={imageDataUrl}
+                        alt={activeTab?.name || "image"}
+                        className="max-w-full max-h-full object-contain rounded-lg shadow-lg"
+                      />
+                    ) : null
+                  ) : isBrowserTab ? (
+                    <iframe
+                      src={/^https?:\/\//i.test(browserUrlInput) ? browserUrlInput : `https://${browserUrlInput}`}
+                      title={activeTab.name}
+                      className="w-full h-full border-0 block bg-white"
+                      sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                    />
+                  ) : activeTab.pdfUrl !== undefined ? (
+                    <div className="flex-1 h-full bg-white dark:bg-zinc-900">
+                      <iframe
+                        src={activeTab.pdfUrl}
+                        title={activeTab.name}
+                        className="w-full h-full border-0 block"
+                      />
+                    </div>
+                  ) : (
+                    <div className="flex-1 h-full bg-white dark:bg-zinc-900">
+                      <iframe
+                        srcDoc={activeTab.htmlContent}
+                        sandbox=""
+                        title={activeTab.name}
+                        className="w-full h-full border-0 block"
+                      />
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <>
               {/* Line Numbers Gutter */}
               <div className="w-10 shrink-0 bg-white dark:bg-[#0a0a0a] border-r border-gray-100 dark:border-zinc-800 py-2 select-none overflow-hidden font-mono text-[12px] leading-6 text-gray-400 dark:text-zinc-500 flex flex-col items-end pr-2">
                 {lines.map((_, i) => (
@@ -1282,6 +1462,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
               <div className="flex-1 p-0 overflow-auto font-mono text-[12px] leading-6 text-gray-900 dark:text-zinc-100 selection:bg-blue-100 dark:selection:bg-blue-900/60 select-text py-2">
                 {renderHighlightedLines(lines)}
               </div>
+                </>
+              )}
             </div>
           </div>
         </div>

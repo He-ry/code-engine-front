@@ -26,6 +26,195 @@ export interface SendMessageResult {
   threadId: string;
 }
 
+export interface AttachmentResult {
+  filename: string;
+  /** Agent-visible path inside the thread workspace (e.g. "uploads/a.docx") */
+  workspacePath: string;
+  objectKey: string | null;
+  url: string | null;
+  size: number;
+  contentType: string;
+}
+
+/** Upload a chat attachment: stored in RustFS AND copied into the thread
+ *  workspace so the agent can read it with read_file. */
+export async function uploadAttachment(
+  baseUrl: string,
+  token: string,
+  threadId: string,
+  file: File,
+): Promise<AttachmentResult> {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await apiFetch(
+    `${baseUrl}/api/chat/threads/${encodeURIComponent(threadId)}/attachments`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    }
+  );
+  if (!res.ok) throw new Error(await detail(res));
+  const json = await res.json();
+  const d = json?.data ?? json;
+  return {
+    filename: d.filename ?? file.name,
+    workspacePath: d.workspace_path ?? "",
+    objectKey: d.object_key ?? null,
+    url: d.url ?? null,
+    size: d.size ?? file.size,
+    contentType: d.content_type ?? file.type,
+  };
+}
+
+/** Extract preview text for a workspace file (PDF/Word/Excel/PPT/text). */
+export async function extractAttachmentText(
+  baseUrl: string,
+  token: string,
+  threadId: string,
+  workspacePath: string,
+): Promise<{ filename: string; text: string }> {
+  const res = await apiFetch(
+    `${baseUrl}/api/chat/threads/${encodeURIComponent(threadId)}/attachments/extract?path=${encodeURIComponent(workspacePath)}`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  if (!res.ok) throw new Error(await detail(res));
+  const json = await res.json();
+  const d = json?.data ?? json;
+  return { filename: d.filename ?? "", text: d.text ?? "" };
+}
+
+/** File extensions that get the OfficeCLI HTML preview treatment (chat
+ *  attachments and file-tree clicks both route through this list). */
+export const OFFICE_PREVIEW_EXTS = [".docx", ".xlsx", ".pptx"];
+
+/** True when the workspace path should prefer the HTML render over text. */
+export function isOfficePreviewPath(path: string): boolean {
+  const lower = path.toLowerCase();
+  return OFFICE_PREVIEW_EXTS.some((e) => lower.endsWith(e));
+}
+
+/** True for PDF files — previewed with the browser's built-in PDF viewer
+ *  (iframe), NOT OnlyOffice (which only covers docx/xlsx/pptx). */
+export function isPdfPath(path: string): boolean {
+  return path.toLowerCase().endsWith(".pdf");
+}
+
+/** Download a thread workspace file with auth and wrap it in a blob: object
+ *  URL the PDF iframe can render (iframes can't send Authorization headers).
+ *  The caller must URL.revokeObjectURL the result when done (tab close). */
+export async function downloadThreadFileUrl(
+  baseUrl: string,
+  token: string,
+  threadId: string,
+  workspacePath: string
+): Promise<string> {
+  const res = await apiFetch(
+    `${baseUrl}/api/chat/threads/${encodeURIComponent(threadId)}/attachments/download?path=${encodeURIComponent(workspacePath)}`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  if (!res.ok) throw new Error(await detail(res));
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
+}
+
+/** Rendered HTML preview for Office attachments (OfficeCLI). html is null
+ *  when OfficeCLI is unavailable or conversion failed — callers should then
+ *  fall back to extractAttachmentText. */
+export async function previewAttachmentHtml(
+  baseUrl: string,
+  token: string,
+  threadId: string,
+  workspacePath: string,
+): Promise<{ filename: string; html: string | null }> {
+  const res = await apiFetch(
+    `${baseUrl}/api/chat/threads/${encodeURIComponent(threadId)}/attachments/preview?path=${encodeURIComponent(workspacePath)}`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  if (!res.ok) throw new Error(await detail(res));
+  const json = await res.json();
+  const d = json?.data ?? json;
+  return { filename: d.filename ?? "", html: d.html ?? null };
+}
+
+/** OnlyOffice editor config for a thread workspace file (interactive edit
+ *  with save-back). enabled=false → caller falls back to the OfficeCLI
+ *  HTML preview. */
+export interface OnlyOfficeConfigResult {
+  enabled: boolean;
+  documentType?: string;
+  config?: Record<string, unknown>;
+}
+
+export async function getOnlyOfficeThreadConfig(
+  baseUrl: string,
+  token: string,
+  threadId: string,
+  workspacePath: string,
+  mode: "edit" | "view" = "edit",
+): Promise<OnlyOfficeConfigResult> {
+  const params = new URLSearchParams({
+    thread_id: threadId,
+    path: workspacePath,
+    mode,
+  });
+  const res = await apiFetch(`${baseUrl}/api/onlyoffice/editor-config?${params}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  const json = await res.json();
+  return json?.data ?? { enabled: false };
+}
+
+/** Download a raw workspace file (uploaded attachment or agent-generated
+ *  artifact) as a Blob. Uses raw fetch — apiFetch's clone().json() probe
+ *  would double-buffer large binaries. */
+export async function downloadWorkspaceFile(
+  baseUrl: string,
+  token: string,
+  threadId: string,
+  workspacePath: string
+): Promise<{ blob: Blob; filename: string }> {
+  const res = await fetch(
+    `${baseUrl}/api/chat/threads/${encodeURIComponent(threadId)}/attachments/download?path=${encodeURIComponent(workspacePath)}`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  if (res.status === 401 || res.status === 403) triggerUnauthorized();
+  if (!res.ok) throw new Error(await detail(res));
+  const disposition = res.headers.get("Content-Disposition") ?? "";
+  let filename = workspacePath.split("/").pop() || "file";
+  const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match) {
+    try {
+      filename = decodeURIComponent(utf8Match[1]);
+    } catch {
+      /* keep fallback */
+    }
+  }
+  return { blob: await res.blob(), filename };
+}
+
+/** Trigger a browser download of a workspace file. */
+export async function saveWorkspaceFileAs(
+  baseUrl: string,
+  token: string,
+  threadId: string,
+  workspacePath: string
+): Promise<void> {
+  const { blob, filename } = await downloadWorkspaceFile(baseUrl, token, threadId, workspacePath);
+  const url = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  }
+}
+
 /** A single parsed SSE event pushed to the stream callback. */
 export interface AgentStreamEvent {
   /** The SSE `event:` field (e.g. "agent_message_delta"). */
@@ -157,7 +346,9 @@ export async function loadHistory(
 // Send + stream
 // ---------------------------------------------------------------------------
 
-/** Send a user message. Returns the sub_id to correlate stream events. */
+/** Send a user message. Returns the sub_id to correlate stream events.
+ * `images` are data: URLs — the server uploads them to RustFS and attaches
+ * them as input_image parts on the user message. */
 export async function sendMessage(
   baseUrl: string,
   token: string,
@@ -165,6 +356,8 @@ export async function sendMessage(
   modelId: string,
   text: string,
   approvalPolicy?: string,
+  skills?: string[],
+  images?: string[],
 ): Promise<SendMessageResult> {
   const res = await apiFetch(`${baseUrl}/api/chat/threads/${encodeURIComponent(threadId)}/messages`, {
     method: "POST",
@@ -172,7 +365,13 @@ export async function sendMessage(
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,
     },
-    body: JSON.stringify({ model_id: modelId, text, approval_policy: approvalPolicy || "auto" }),
+    body: JSON.stringify({
+      model_id: modelId,
+      text,
+      approval_policy: approvalPolicy || "auto",
+      ...(skills && skills.length > 0 ? { skills } : {}),
+      ...(images && images.length > 0 ? { images } : {}),
+    }),
   });
   if (!res.ok) throw new Error(await detail(res));
   const json = await res.json();
@@ -283,15 +482,15 @@ export async function approveTool(
   if (!res.ok) throw new Error(await detail(res));
 }
 
-/** Reply to a pending AskUser request. */
+/** Reply to a pending AskUser request. `answers` maps question id → selected label/text. */
 export async function respondInput(
   baseUrl: string,
   token: string,
   threadId: string,
   inputId: string,
-  responseText: string
+  answers: Record<string, string>
 ): Promise<void> {
-  const params = new URLSearchParams({ input_id: inputId, response_text: responseText });
+  const params = new URLSearchParams({ input_id: inputId, answers: JSON.stringify(answers) });
   const res = await apiFetch(
     `${baseUrl}/api/chat/threads/${encodeURIComponent(threadId)}/respond?${params}`,
     { method: "POST", headers: { Authorization: `Bearer ${token}` } }

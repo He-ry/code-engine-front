@@ -719,23 +719,22 @@ Before executing environment deployment, please confirm your deployment mode pre
     clarificationQuestions: [
       {
         id: "cq-1",
-        question: "1. What is the primary purpose of this agent?",
+        header: "Purpose",
+        question: "What is the primary purpose of this agent?",
         options: [
-          { letter: "A", label: "Code review", value: "code_review" },
-          { letter: "B", label: "Deployment & DevOps", value: "devops" },
-          { letter: "C", label: "Code exploration & search", value: "search_explore" },
-          { letter: "D", label: "Testing & QA", value: "testing_qa" },
-          { letter: "E", label: "Custom features (please describe)", value: "custom_feature", isCustomInput: true },
-          { letter: "F", label: "Other...", value: "other" }
+          { label: "Code review (Recommended)", description: "Check code quality, security, and performance." },
+          { label: "Deployment & DevOps", description: "Build, deploy, and operate services." },
+          { label: "Code exploration & search", description: "Navigate and explain a codebase." },
+          { label: "Testing & QA", description: "Write and run tests." },
         ]
       },
       {
         id: "cq-2",
-        question: "2. What name would you like to give to this agent?",
+        header: "Name",
+        question: "What name would you like to give to this agent?",
         options: [
-          { letter: "A", label: "Blackbox Core Agent", value: "name_blackbox" },
-          { letter: "B", label: "DeepSeek Assistant", value: "name_deepseek" },
-          { letter: "C", label: "Custom Name...", value: "name_custom", isCustomInput: true }
+          { label: "Blackbox Core Agent (Recommended)", description: "A neutral core-assistant name." },
+          { label: "DeepSeek Assistant", description: "Reflects the underlying model." },
         ]
       }
     ]
@@ -889,23 +888,22 @@ export const DEFAULT_CHAT_MESSAGES: ChatMessage[] = [
     clarificationQuestions: [
       {
         id: "cq-1",
-        question: "1. 你希望这个 agent 主要用来做什么？",
+        header: "用途",
+        question: "你希望这个 agent 主要用来做什么？",
         options: [
-          { letter: "A", label: "代码审查 (code review)", value: "code_review" },
-          { letter: "B", label: "部署/运维相关", value: "devops" },
-          { letter: "C", label: "代码探索与搜索", value: "search_explore" },
-          { letter: "D", label: "测试与质量检查", value: "testing_qa" },
-          { letter: "E", label: "自定义功能（请描述）", value: "custom_feature", isCustomInput: true },
-          { letter: "F", label: "Other...", value: "other" }
+          { label: "代码审查 (Recommended)", description: "检查代码质量、安全与性能。" },
+          { label: "部署/运维相关", description: "构建、部署与运维服务。" },
+          { label: "代码探索与搜索", description: "浏览并解释代码库。" },
+          { label: "测试与质量检查", description: "编写并运行测试。" },
         ]
       },
       {
         id: "cq-2",
-        question: "2. 你想给这个 agent 起什么名字？",
+        header: "命名",
+        question: "你想给这个 agent 起什么名字？",
         options: [
-          { letter: "A", label: "Blackbox Core Agent", value: "name_blackbox" },
-          { letter: "B", label: "DeepSeek Assistant", value: "name_deepseek" },
-          { letter: "C", label: "自定义名称...", value: "name_custom", isCustomInput: true }
+          { label: "Blackbox Core Agent (Recommended)", description: "中性的核心助手名。" },
+          { label: "DeepSeek Assistant", description: "体现底层模型。" },
         ]
       }
     ]

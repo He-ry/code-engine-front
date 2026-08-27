@@ -17,7 +17,7 @@ interface FileChangeCardProps {
   isStreaming: boolean;
   onApprove?: (toolId: string) => void;
   onReject?: (toolId: string) => void;
-  onOpenFile?: (path: string, content: string) => void;
+  onOpenFile?: (path: string, content: string, pendingChange?: { toolCallId: string; originalContent: string | null }) => void;
   onKeepFile?: (path: string) => void;
   onRevertFile?: (path: string, originalContent: string | null) => void;
 }
@@ -202,7 +202,7 @@ export const FileChangeCard: React.FC<FileChangeCardProps> = ({
 
   const isPending = status === "pending";
   const isRunning = status === "running";
-  const isError = status === "error" || status === "failed" || status === "declined" || status === "aborted";
+  const isError = status === "error";
 
   // Extract file paths from tool args once (complete JSON, fast path).
   // Show raw contentDelta directly — no expensive regex re-parsing on every delta.
@@ -358,7 +358,10 @@ export const FileChangeCard: React.FC<FileChangeCardProps> = ({
                   {/* File path bar */}
                   <div
                     className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-50/50 dark:bg-zinc-950/50 cursor-pointer hover:bg-gray-100 dark:hover:bg-zinc-800/60 transition-colors"
-                    onClick={() => onOpenFile?.(pf.path, pf.content)}
+                    onClick={() => onOpenFile?.(pf.path, pf.content, {
+                      toolCallId: tool.id,
+                      originalContent: null,
+                    })}
                   >
                     <FilePlus className="w-3 h-3 text-emerald-500 shrink-0" />
                     <span className="font-mono text-xs text-gray-700 dark:text-zinc-300 bg-gray-200/60 dark:bg-zinc-800 rounded px-1.5 py-0.5 truncate">
@@ -409,7 +412,10 @@ export const FileChangeCard: React.FC<FileChangeCardProps> = ({
             <button
               onClick={() => {
                 for (const pf of pendingFiles) {
-                  onOpenFile?.(pf.path, pf.content);
+                  onOpenFile?.(pf.path, pf.content, {
+                    toolCallId: tool.id,
+                    originalContent: null, // new files from write_file have no original
+                  });
                 }
               }}
               className="px-2 py-1 text-[11px] font-medium text-gray-600 dark:text-zinc-400 hover:text-gray-800 dark:hover:text-zinc-200 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded transition-colors cursor-pointer flex items-center gap-1"
@@ -467,7 +473,10 @@ export const FileChangeCard: React.FC<FileChangeCardProps> = ({
             key={f.path}
             onClick={(e) => {
               e.stopPropagation();
-              onOpenFile?.(f.path, f.content || "");
+              onOpenFile?.(f.path, f.content || "", {
+                toolCallId: tool.id,
+                originalContent: f.original_content ?? null,
+              });
             }}
             className="font-mono text-xs text-gray-700 dark:text-zinc-300 bg-gray-100 dark:bg-zinc-800/80 rounded px-1.5 py-0.5 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-gray-200 dark:hover:bg-zinc-700/80 truncate max-w-[220px] cursor-pointer transition-colors"
             title={f.path}

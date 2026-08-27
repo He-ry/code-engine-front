@@ -15,14 +15,14 @@ import {
   Plus,
   ArrowLeft,
   ArrowRight,
-  Sparkles,
   Smartphone,
   ExternalLink,
   Code2,
   Loader2,
+  Monitor,
 } from "lucide-react";
 import { FileNode } from "../types";
-import { listFiles, readFile } from "../lib/projectApi";
+import { listFiles, readFile, getPreviewUrl, siteUrl } from "../lib/projectApi";
 
 interface RightPanelProps {
   isOpen: boolean;
@@ -32,6 +32,7 @@ interface RightPanelProps {
   projectName: string;
   projectId?: string;
   width?: number;
+  fileTreeVersion?: number;
 }
 
 export const RightPanel: React.FC<RightPanelProps> = ({
@@ -42,6 +43,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({
   projectName,
   projectId,
   width = 320,
+  fileTreeVersion = 0,
 }) => {
   const { t, backendApiUrl, user } = useSettings();
   const [activeTab, setActiveTab] = useState<"explorer" | "search" | "git" | "browser">(
@@ -55,11 +57,46 @@ export const RightPanel: React.FC<RightPanelProps> = ({
   // Browser state
   const [urlInput, setUrlInput] = useState("https://example.com");
   const [iframeUrl, setIframeUrl] = useState("https://example.com");
-  const [browserMode, setBrowserMode] = useState<"mock" | "real">("mock");
-  const [selectedElement, setSelectedElement] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
 
   const baseUrl = backendApiUrl || "https://agent.hery.cloud";
   const token = user?.token || "";
+
+  // Preview the workspace dev server via the backend preview proxy
+  const handlePreviewWorkspace = useCallback(async () => {
+    if (!projectId || !token) {
+      setPreviewError(t("请先选择项目并登录", "Select a project and log in first"));
+      return;
+    }
+    setPreviewLoading(true);
+    setPreviewError(null);
+    try {
+      // A bare port number in the address bar overrides the default 3000
+      const m = urlInput.trim().match(/^(\d{1,5})$/);
+      const port = m ? parseInt(m[1], 10) : 3000;
+      const { url } = await getPreviewUrl(baseUrl, token, projectId, port);
+      setUrlInput(url);
+      setIframeUrl(url);
+    } catch (e: any) {
+      setPreviewError(e?.message || String(e));
+      setIframeUrl("");
+    } finally {
+      setPreviewLoading(false);
+    }
+  }, [projectId, token, baseUrl, urlInput, t]);
+
+  // Static preview: serve workspace files directly (agent-written pages)
+  const handleStaticPreview = useCallback(() => {
+    if (!projectId) {
+      setPreviewError(t("请先选择项目", "Select a project first"));
+      return;
+    }
+    setPreviewError(null);
+    const url = siteUrl(baseUrl, projectId, "index.html");
+    setUrlInput(url);
+    setIframeUrl(url);
+  }, [projectId, baseUrl, t]);
 
   // Load files for a given path
   const loadPath = useCallback(
@@ -102,6 +139,15 @@ export const RightPanel: React.FC<RightPanelProps> = ({
       loadPath(".");
     }
   }, [isOpen, activeTab, projectId]);
+
+  // Refresh file tree when fileTreeVersion bumps (external file mutations)
+  useEffect(() => {
+    if (fileTreeVersion > 0 && isOpen && activeTab === "explorer" && projectId) {
+      setFileTree({});
+      setExpandedFolders({});
+      loadPath(".");
+    }
+  }, [fileTreeVersion]);
 
   const toggleFolder = async (path: string) => {
     const isCurrentlyExpanded = expandedFolders[path];
@@ -349,12 +395,11 @@ export const RightPanel: React.FC<RightPanelProps> = ({
             {/* Browser Header Bar */}
             <div className="p-2 bg-white dark:bg-[#0d0d0d] border-b border-gray-200 dark:border-zinc-800 flex items-center gap-1.5 text-xs text-gray-600 dark:text-zinc-300">
               <div className="flex items-center gap-1 shrink-0">
-                <button 
-                  type="button" 
+                <button
+                  type="button"
                   onClick={() => {
                     setUrlInput("https://example.com");
                     setIframeUrl("https://example.com");
-                    setBrowserMode("real");
                   }}
                   className="p-1 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded text-gray-400 dark:text-zinc-500"
                   title={t("返回首页", "Back Home")}
@@ -389,7 +434,6 @@ export const RightPanel: React.FC<RightPanelProps> = ({
                         const target = /^https?:\/\//i.test(url) ? url : `https://${url}`;
                         setUrlInput(target);
                         setIframeUrl(target);
-                        setBrowserMode("real");
                       }
                     }
                   }}
@@ -399,6 +443,42 @@ export const RightPanel: React.FC<RightPanelProps> = ({
               </div>
 
               <div className="flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  onClick={handleStaticPreview}
+                  disabled={!projectId}
+                  className={`p-1 rounded ${
+                    !projectId
+                      ? "text-gray-300 dark:text-zinc-600"
+                      : "text-emerald-600 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950/30"
+                  }`}
+                  title={t(
+                    "静态预览工作区页面（直接读取项目文件，无需启动服务）",
+                    "Static preview of workspace pages (files served directly, no server needed)"
+                  )}
+                >
+                  <Code2 className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={handlePreviewWorkspace}
+                  disabled={previewLoading || !projectId}
+                  className={`p-1 rounded ${
+                    previewLoading || !projectId
+                      ? "text-gray-300 dark:text-zinc-600"
+                      : "text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/30"
+                  }`}
+                  title={t(
+                    "预览工作区 dev server（默认端口 3000；输入框先输入其他端口号可覆盖）",
+                    "Preview workspace dev server (default port 3000; type another port in the address bar first)"
+                  )}
+                >
+                  {previewLoading ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Monitor className="w-3.5 h-3.5" />
+                  )}
+                </button>
                 <button
                   type="button"
                   onClick={() => {
@@ -423,146 +503,42 @@ export const RightPanel: React.FC<RightPanelProps> = ({
                 >
                   <ExternalLink className="w-3.5 h-3.5" />
                 </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    const element = selectedElement ? null : "Title";
-                    setSelectedElement(element);
-                    setBrowserMode("mock");
-                  }}
-                  className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors ${
-                    selectedElement && browserMode === "mock"
-                      ? "bg-blue-600 text-white"
-                      : "bg-gray-100 dark:bg-zinc-800 text-gray-700 dark:text-zinc-200 hover:bg-gray-200 dark:hover:bg-zinc-700"
-                  }`}
-                  title={t("智能编辑", "Smart Edit")}
-                >
-                  <Sparkles className="w-3 h-3" />
-                  <span>{t("编辑", "Edit")}</span>
-                </button>
               </div>
-            </div>
-
-            {/* Browser Mode Toggles */}
-            <div className="flex border-b border-gray-200 dark:border-zinc-800 bg-white dark:bg-[#0d0d0d] text-[11px]">
-              <button
-                type="button"
-                onClick={() => setBrowserMode("mock")}
-                className={`flex-1 py-1.5 text-center font-medium border-b-2 transition-all ${
-                  browserMode === "mock"
-                    ? "border-blue-500 text-blue-600 dark:text-blue-400 bg-blue-50/20 dark:bg-blue-950/10"
-                    : "border-transparent text-gray-500 dark:text-zinc-400 hover:text-gray-700 dark:hover:text-zinc-200"
-                }`}
-              >
-                {t("模拟调试", "Mock Debug")}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setBrowserMode("real");
-                  // Ensure iframe url has correct format
-                  const url = urlInput.trim();
-                  const target = /^https?:\/\//i.test(url) ? url : `https://${url}`;
-                  setIframeUrl(target);
-                }}
-                className={`flex-1 py-1.5 text-center font-medium border-b-2 transition-all ${
-                  browserMode === "real"
-                    ? "border-blue-500 text-blue-600 dark:text-blue-400 bg-blue-50/20 dark:bg-blue-950/10"
-                    : "border-transparent text-gray-500 dark:text-zinc-400 hover:text-gray-700 dark:hover:text-zinc-200"
-                }`}
-              >
-                {t("内置网页渲染", "Embedded Rendering")}
-              </button>
             </div>
 
             {/* Embedded Browser Stage Canvas */}
             <div className="flex-1 flex flex-col min-h-0 bg-white dark:bg-black overflow-hidden">
-              {browserMode === "mock" ? (
-                <div className="flex-1 p-4 overflow-y-auto flex flex-col items-center justify-center text-center">
-                  <div className="max-w-xs space-y-4">
-                    <h3 className="text-base font-bold text-gray-900 dark:text-zinc-100 tracking-tight">
-                      CodeEngine Browser
-                    </h3>
-
-                    <div className="grid grid-cols-1 gap-3 text-left">
-                      <div
-                        onClick={() => setSelectedElement("ProjectView")}
-                        className={`p-3 bg-white dark:bg-zinc-900 border rounded-xl shadow-xs cursor-pointer transition-all ${
-                          selectedElement === "ProjectView"
-                            ? "border-blue-500 ring-2 ring-blue-100 dark:ring-blue-900/50"
-                            : "border-gray-200 dark:border-zinc-800 hover:border-gray-300 dark:hover:border-zinc-700"
-                        }`}
-                      >
-                        <div className="text-xs font-medium text-gray-800 dark:text-zinc-200 mb-1">
-                          {t("打开项目，选择元素进行调试", "Open project and select elements to debug")}
-                        </div>
-                        <div className="h-16 bg-gray-100 dark:bg-zinc-800 rounded-lg p-2 flex items-center justify-center relative overflow-hidden">
-                          <div className="px-2 py-1 bg-blue-500 text-white rounded text-[10px] font-mono shadow-xs">
-                            {t("选中元素", "Selected Element")}
-                          </div>
-                        </div>
-                        <div className="mt-2 flex items-center justify-between text-[10px] text-gray-500 dark:text-zinc-400">
-                          <span>{t("我的项目", "My Project")}</span>
-                          <span className="text-blue-600 dark:text-blue-400 font-medium">{t("发送到对话 ↵", "Send to chat ↵")}</span>
-                        </div>
-                      </div>
-
-                      <div
-                        onClick={() => setSelectedElement("FigmaView")}
-                        className={`p-3 bg-white dark:bg-zinc-900 border rounded-xl shadow-xs cursor-pointer transition-all ${
-                          selectedElement === "FigmaView"
-                            ? "border-purple-500 ring-2 ring-purple-100 dark:ring-purple-900/50"
-                            : "border-gray-200 dark:border-zinc-800 hover:border-gray-300 dark:hover:border-zinc-700"
-                        }`}
-                      >
-                        <div className="text-xs font-medium text-gray-800 dark:text-zinc-200 mb-1">
-                          {t("打开 Figma，选择元素生成代码", "Open Figma and select elements to generate code")}
-                        </div>
-                        <div className="h-16 bg-purple-50 dark:bg-purple-950/30 rounded-lg p-2 flex items-center justify-center relative">
-                          <div className="px-2 py-1 bg-purple-600 text-white rounded text-[10px] font-mono shadow-xs">
-                            {t("发送到对话 ➔", "Send to chat ➔")}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="pt-2 text-[11px] text-gray-400 dark:text-zinc-500">
-                      {t("不知道如何启动项目？", "Don't know how to start project?")}{" "}
-                      <a href="#ai-start" className="text-gray-700 dark:text-zinc-300 underline font-medium">
-                        {t("尝试使用 AI 启动 →", "Try starting with AI →")}
-                      </a>
-                    </div>
+              <div className="flex-1 flex flex-col relative min-h-0">
+                {previewError && (
+                  <div className="px-2 py-1 bg-red-50 dark:bg-red-950/20 border-b border-red-100 dark:border-red-900/30 text-[10px] text-red-600 dark:text-red-400 shrink-0">
+                    {t("预览不可用", "Preview unavailable")}: {previewError}
                   </div>
-                </div>
-              ) : (
-                <div className="flex-1 flex flex-col relative min-h-0">
-                  {iframeUrl ? (
-                    <iframe
-                      src={iframeUrl}
-                      className="w-full flex-1 bg-white border-none"
-                      sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-                    />
-                  ) : (
-                    <div className="flex-1 flex items-center justify-center text-xs text-gray-400 dark:text-zinc-500">
-                      {t("正在加载网页...", "Loading webpage...")}
-                    </div>
-                  )}
-                  {/* Floating helpful notice about Same Origin Policy */}
-                  <div className="p-2 bg-amber-50 dark:bg-amber-950/20 border-t border-amber-100 dark:border-amber-900/30 text-[10px] text-amber-800 dark:text-amber-300 flex items-center justify-between shrink-0 leading-normal">
-                    <span>
-                      {t("💡 提示：由于浏览器同源策略限制，部分第三方网站（如百度、谷歌）可能拒绝被嵌入。", "💡 Note: Due to browser same-origin policy, some third-party sites may refuse embedding.")}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => window.open(urlInput, "_blank")}
-                      className="font-semibold underline shrink-0 hover:text-amber-900 dark:hover:text-amber-100 ml-1.5"
-                    >
-                      {t("在新标签页打开", "Open in new tab")}
-                    </button>
+                )}
+                {iframeUrl ? (
+                  <iframe
+                    src={iframeUrl}
+                    className="w-full flex-1 bg-white border-none"
+                    sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                  />
+                ) : (
+                  <div className="flex-1 flex items-center justify-center text-xs text-gray-400 dark:text-zinc-500">
+                    {t("正在加载网页...", "Loading webpage...")}
                   </div>
+                )}
+                {/* Floating helpful notice about Same Origin Policy */}
+                <div className="p-2 bg-amber-50 dark:bg-amber-950/20 border-t border-amber-100 dark:border-amber-900/30 text-[10px] text-amber-800 dark:text-amber-300 flex items-center justify-between shrink-0 leading-normal">
+                  <span>
+                    {t("💡 提示：由于浏览器同源策略限制，部分第三方网站（如百度、谷歌）可能拒绝被嵌入。", "💡 Note: Due to browser same-origin policy, some third-party sites may refuse embedding.")}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => window.open(urlInput, "_blank")}
+                    className="font-semibold underline shrink-0 hover:text-amber-900 dark:hover:text-amber-100 ml-1.5"
+                  >
+                    {t("在新标签页打开", "Open in new tab")}
+                  </button>
                 </div>
-              )}
+              </div>
             </div>
           </div>
         )}
