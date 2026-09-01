@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { useLocation, useNavigate, matchPath } from "react-router-dom";
 import { Sidebar } from "./components/Sidebar";
@@ -105,6 +105,71 @@ export default function App() {
   const navigate = useNavigate();
 
   // 0. Handle OAuth callback (for both popup window and main window redirect)
+  // ── office 实况通道控制器:接收 code-engine-office 的 open-tab 指令 ──
+  // (agent 调 doc_open 时,文档服务把编辑器标签推到这里打开)
+  useEffect(() => {
+    if (!isLoggedIn) return;
+    let ws: WebSocket | null = null;
+    let attempts = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // office 服务地址:本机走 127.0.0.1:3200,远程经预览代理(同源 host:5190)/ofsvc
+    const _oh = window.location.hostname;
+    const _isLocal = _oh === "localhost" || _oh === "127.0.0.1" || _oh === "::1";
+    const base =
+      (window as any).__officeServiceUrlOverride ||
+      (_isLocal ? "http://127.0.0.1:3200" : `http://${_oh}:5190/ofsvc`);
+    const connect = () => {
+      try {
+        const qs = new URLSearchParams({ type: "front" });
+        if (activeProjectId) qs.set("projectId", activeProjectId);
+        const url = base.replace(/^http/, "ws") + "/bridge-ws?" + qs.toString();
+        ws = new WebSocket(url);
+        ws.onopen = () => { attempts = 0; };
+        ws.onmessage = (ev) => {
+          try {
+            const msg = JSON.parse(ev.data);
+            if (msg.type === "open-tab" && msg.editorUrl) {
+              const tabPath = `office:${msg.path || msg.name}`;
+              setOpenTabs((prev) => {
+                const next = prev.filter((t) => t.path !== tabPath && t.path !== msg.path);
+                return [
+                  ...next,
+                  { path: tabPath, name: msg.name || "文档", content: "", livePreviewUrl: base + msg.editorUrl, readOnly: true },
+                ];
+              });
+              setActiveTabPath(tabPath);
+            }
+            // 僵尸标签页自愈 / 页级内存回收:按 fileId 找到对应 office 标签。
+            // tab-stale = 会话失效(服务重启过),正常重开;
+            // tab-recycle = 编辑器页 sdkjs/x2t 双 wasm 堆棘轮超阈值自请回收,
+            //   强制重开(跳过"字节相同跳过重载"比对,整页重建清零堆)。
+            if (msg.type === "tab-stale" || msg.type === "tab-recycle") {
+              const force = msg.type === "tab-recycle";
+              void (async () => {
+                const { officeFileIdFromUrl } = await import("./lib/officePreview");
+                const victim = openTabsRef.current.find(
+                  (t) => t.livePreviewUrl && officeFileIdFromUrl(t.livePreviewUrl) === msg.fileId,
+                );
+                if (victim) {
+                  refreshOfficeTabsRef.current([victim.path.replace(/^office:/, "")], force);
+                }
+              })();
+            }
+          } catch { /* ignore */ }
+        };
+        ws.onclose = () => {
+          attempts += 1;
+          if (attempts <= 10) timer = setTimeout(connect, Math.min(attempts * 2000, 10000));
+        };
+      } catch { /* 服务未启动,静默重试 */ }
+    };
+    connect();
+    return () => {
+      if (timer) clearTimeout(timer);
+      ws?.close();
+    };
+  }, [isLoggedIn, activeProjectId]);
+
   useEffect(() => {
     if (location.pathname.startsWith("/auth/callback")) {
       const searchString = location.search || (location.hash.startsWith("#") ? "?" + location.hash.substring(1) : location.hash);
@@ -395,8 +460,15 @@ export default function App() {
   const pendingInputRef = useRef<{ inputId: string } | null>(null);
   // Highest SSE event seq seen on the current stream — replayed events after
   // a reconnect would otherwise double-append to delta-accumulating blocks.
-  // Reset whenever a new stream (turn) opens.
+  // Reset whenever a new stream (turn) opens. Doubles as the Last-Event-ID
+  // value when reconnecting a cut stream.
   const lastSeqRef = useRef(0);
+  // Whether the current stream reached a terminal event (turn_complete /
+  // error). A stream that ENDS without one was cut mid-turn (network drop /
+  // proxy idle close / superseded connection) — the turn keeps running on
+  // the backend, so the caller reconnects instead of marking the message
+  // complete and silently losing every tool call after the cut.
+  const streamTerminalRef = useRef(false);
   // File-tree refresh counter — bump after any operation that mutates files on disk
   const [fileTreeVersion, setFileTreeVersion] = useState(0);
 
@@ -474,56 +546,93 @@ export default function App() {
   }, [backendModels]);
 
   // Dynamic Panel Resizing state
+  // 拖动期间不走 React state(每个 mousemove setState 会重渲染整棵树:
+  // ChatStream/CodeEditor/RightPanel 均未 memo,长对话时一帧几十 ms → 卡顿)。
+  // 改为直接写容器上的 CSS 变量 --chat-w / --right-w,pane 宽度消费 var;
+  // 松手才 setState 提交一次。React 渲染时 style 值未变则不写 DOM,
+  // 拖动中途其它 state 触发的重渲染不会把变量冲回去。
   const [chatWidth, setChatWidth] = useState<number>(380);
   const [rightPanelWidth, setRightPanelWidth] = useState<number>(320);
   const [isResizingChat, setIsResizingChat] = useState<boolean>(false);
   const [isResizingRight, setIsResizingRight] = useState<boolean>(false);
+  const splitContainerRef = useRef<HTMLDivElement | null>(null);
+  const dragCtxRef = useRef<{
+    kind: "chat" | "right";
+    startX: number;
+    startW: number;
+    lastW: number;
+    raf: number;
+  } | null>(null);
 
-  const handleChatResizeStart = (e: React.MouseEvent) => {
-    e.preventDefault();
-    setIsResizingChat(true);
-
-    const startX = e.clientX;
-    const startWidth = chatWidth;
-
-    const onMouseMove = (moveEvent: MouseEvent) => {
-      const delta = moveEvent.clientX - startX;
-      const newWidth = Math.max(260, Math.min(700, startWidth + delta));
-      setChatWidth(newWidth);
-    };
-
-    const onMouseUp = () => {
+  // pointer capture:后续 pointermove/up 始终发回分割条,指针滑过
+  // CodeEditor/RightPanel 里的 iframe 时事件不再被 iframe 吞掉
+  // (旧实现监听 window,鼠标进 iframe 就"冻住",mouseup 落在 iframe 上
+  // 监听器永不清理,isResizing 卡死,下次拖动新旧监听器打架 → 拖不动)
+  const finishResize = () => {
+    const ctx = dragCtxRef.current;
+    if (!ctx) return;
+    cancelAnimationFrame(ctx.raf);
+    if (ctx.kind === "chat") {
+      setChatWidth(ctx.lastW);
       setIsResizingChat(false);
-      window.removeEventListener("mousemove", onMouseMove);
-      window.removeEventListener("mouseup", onMouseUp);
-    };
-
-    window.addEventListener("mousemove", onMouseMove);
-    window.addEventListener("mouseup", onMouseUp);
-  };
-
-  const handleRightResizeStart = (e: React.MouseEvent) => {
-    e.preventDefault();
-    setIsResizingRight(true);
-
-    const startX = e.clientX;
-    const startWidth = rightPanelWidth;
-
-    const onMouseMove = (moveEvent: MouseEvent) => {
-      const delta = startX - moveEvent.clientX;
-      const newWidth = Math.max(200, Math.min(650, startWidth + delta));
-      setRightPanelWidth(newWidth);
-    };
-
-    const onMouseUp = () => {
+    } else {
+      setRightPanelWidth(ctx.lastW);
       setIsResizingRight(false);
-      window.removeEventListener("mousemove", onMouseMove);
-      window.removeEventListener("mouseup", onMouseUp);
-    };
-
-    window.addEventListener("mousemove", onMouseMove);
-    window.addEventListener("mouseup", onMouseUp);
+    }
+    dragCtxRef.current = null;
   };
+
+  const handleResizePointerDown = (kind: "chat" | "right") => (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {}
+    dragCtxRef.current = {
+      kind,
+      startX: e.clientX,
+      startW: kind === "chat" ? chatWidth : rightPanelWidth,
+      lastW: kind === "chat" ? chatWidth : rightPanelWidth,
+      raf: 0,
+    };
+    if (kind === "chat") setIsResizingChat(true);
+    else setIsResizingRight(true);
+    // 兜底:分割条若在拖动中被卸载(openTabs/rightPanelOpen 变化)会失去
+    // capture,onPointerUp 不再触发 —— window 级 pointerup 保证拖动状态必被清理
+    // (dragCtxRef 空判保证与正常路径不会重复提交)
+    window.addEventListener("pointerup", finishResize, { once: true });
+    window.addEventListener("pointercancel", finishResize, { once: true });
+  };
+
+  // 编辑区(剩余空间)保底宽:两侧面板拖到最大也不把它挤没
+  const EDITOR_MIN_W = 280;
+
+  const handleResizePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const ctx = dragCtxRef.current;
+    if (!ctx) return;
+    const delta = ctx.kind === "chat" ? e.clientX - ctx.startX : ctx.startX - e.clientX;
+    const min = ctx.kind === "chat" ? 260 : 200;
+    // 上限不写死,按容器实际宽度动态算:面板最大放到「容器宽 − 另一侧面板宽 −
+    // 编辑区保底宽」,编辑区(剩余空间)想压多窄都行;没打开 tabs(编辑区
+    // 不存在)时只需给聊天区留下限
+    const containerW = splitContainerRef.current?.clientWidth ?? 0;
+    const editorReserve = openTabs.length > 0 ? EDITOR_MIN_W : 0;
+    const max =
+      ctx.kind === "chat"
+        ? containerW - (rightPanelOpen ? rightPanelWidth : 0) - editorReserve
+        : containerW - (openTabs.length > 0 ? chatWidth : 260) - editorReserve;
+    ctx.lastW = Math.max(min, Math.min(max, ctx.startW + delta));
+    // rAF 合帧:高回报率鼠标(125–1000Hz)下一帧多次 move 只写一次
+    cancelAnimationFrame(ctx.raf);
+    const w = ctx.lastW;
+    ctx.raf = requestAnimationFrame(() => {
+      splitContainerRef.current?.style.setProperty(
+        ctx.kind === "chat" ? "--chat-w" : "--right-w",
+        `${w}px`,
+      );
+    });
+  };
+
+  const handleResizePointerEnd = () => finishResize();
 
   const activeProject =
     projects.find((p) => p.id === activeProjectId) || projects[0] || { id: "", name: "No Project", branch: "main" };
@@ -746,6 +855,22 @@ export default function App() {
     const existing = openTabs.find((t) => t.path === file.path);
     if (existing) {
       setActiveTabPath(file.path);
+      // office 编辑器标签:文件可能已被 agent 改过,重新拉字节刷新预览
+      if (existing.livePreviewUrl && user?.token && activeProjectId) {
+        const tabPath = file.path;
+        (async () => {
+          const baseUrl = backendApiUrl || "https://agent.hery.cloud";
+          try {
+            const { downloadProjectFileBytes } = await import("./lib/projectApi");
+            const { openInOfficeService, officeEditorUrl } = await import("./lib/officePreview");
+            const bytes = await downloadProjectFileBytes(baseUrl, user!.token!, activeProjectId!, file.path);
+            const opened = await openInOfficeService(bytes, file.name, file.path, { baseUrl, token: user!.token!, projectId: activeProjectId! });
+            setOpenTabs((cur) =>
+              cur.map((t) => (t.path === tabPath ? { ...t, livePreviewUrl: officeEditorUrl(opened) } : t))
+            );
+          } catch { /* 刷新失败保持旧内容 */ }
+        })();
+      }
       return;
     }
 
@@ -768,8 +893,8 @@ export default function App() {
       return;
     }
 
-    // Office files prefer the OnlyOffice interactive editor (edit +
-    // save-back); OfficeCLI HTML render is the fallback, then raw content.
+    // Office files render via the OfficeCLI HTML preview; raw content is
+    // the fallback when the renderer is unavailable.
     if (isOfficePreviewPath(file.path) && user?.token && activeProjectId) {
       const tabPath = file.path;
       setOpenTabs((prev) => [
@@ -779,45 +904,27 @@ export default function App() {
       setActiveTabPath(tabPath);
       (async () => {
         const baseUrl = backendApiUrl || "https://agent.hery.cloud";
-        // 1) OnlyOffice interactive editor
+        // Office 文件唯一预览方式:code-engine-office 真编辑器(不回退 OfficeCLI)
         try {
-          const { getOnlyOfficeProjectConfig } = await import("./lib/projectApi");
-          const oo = await getOnlyOfficeProjectConfig(baseUrl, user!.token!, activeProjectId!, file.path, "edit");
-          if (oo.enabled && oo.config) {
-            setOpenTabs((prev) =>
-              prev.map((t) =>
-                t.path === tabPath
-                  ? { ...t, onlyofficeConfig: { documentType: oo.documentType!, config: oo.config }, readOnly: false }
-                  : t
-              )
-            );
-            return;
-          }
-        } catch {
-          // fall through to the OfficeCLI preview
-        }
-        // 2) OfficeCLI static HTML preview
-        try {
-          const { previewProjectFile } = await import("./lib/projectApi");
-          const { html } = await previewProjectFile(baseUrl, user!.token!, activeProjectId!, file.path);
-          if (html) {
-            setOpenTabs((prev) =>
-              prev.map((t) => (t.path === tabPath ? { ...t, htmlContent: html } : t))
-            );
-            return;
-          }
-        } catch {
-          // fall through to the read fallback below
-        }
-        // 3) Fallback: keep the raw content the file tree already fetched.
-        setOpenTabs((prev) =>
-          prev.map((t) =>
-            t.path === tabPath
-              ? { ...t, content: file.content || `// ${file.name} content\n` }
-              : t
-          )
-        );
-      })();
+          const { downloadProjectFileBytes } = await import("./lib/projectApi");
+          const { openInOfficeService, officeEditorUrl } = await import("./lib/officePreview");
+          const bytes = await downloadProjectFileBytes(baseUrl, user!.token!, activeProjectId!, file.path);
+          const opened = await openInOfficeService(bytes, file.name, file.path, { baseUrl, token: user!.token!, projectId: activeProjectId! });
+          setOpenTabs((prev) =>
+            prev.map((t) => (t.path === tabPath ? { ...t, livePreviewUrl: officeEditorUrl(opened) } : t))
+          );
+        } catch (e: any) {
+          setOpenTabs((prev) =>
+            prev.map((t) =>
+              t.path === tabPath
+                ? { ...t, content: `// ❌ 文档预览失败: ${e?.message || e}
+//
+// Office 文件统一由 code-engine-office 服务预览。
+// 请确认服务已启动: cd code-engine-office && npm run dev (端口 3200)` }
+                : t
+            )
+          );
+        }})();
       return;
     }
 
@@ -837,79 +944,97 @@ export default function App() {
     openTabsRef.current = openTabs;
   }, [openTabs]);
 
-  // Re-fetch the OfficeCLI HTML render (or a fresh OnlyOffice config) for
-  // any open office tab whose workspace file just changed on disk (e.g. the
-  // agent edited the docx the user is viewing). Stale on failure — the user
-  // can reopen the tab. OnlyOffice tabs get a new config (its document.key
-  // derives from mtime) which remounts the editor with the new content.
-  const refreshOfficePreviewTabs = (changedPaths: string[]) => {
+  // Re-fetch the OfficeCLI HTML render for any open office tab whose
+  // workspace file just changed on disk (e.g. the agent edited the docx the
+  // user is viewing). Stale on failure — the user can reopen the tab.
+  const refreshOfficePreviewTabs = (changedPaths: string[], force = false) => {
     if (changedPaths.length === 0) return;
+    for (const path of changedPaths) {
+      // M1: collapse bursts (agent small-step edits) into one refresh/path.
+      const prev = officeRefreshTimersRef.current.get(path);
+      if (prev) window.clearTimeout(prev);
+      officeRefreshTimersRef.current.set(
+        path,
+        window.setTimeout(() => {
+          officeRefreshTimersRef.current.delete(path);
+          void refreshOneOfficeTab(path, force);
+        }, 800)
+      );
+    }
+  };
+
+  const refreshOneOfficeTab = async (path: string, force = false) => {
     const baseUrl = backendApiUrl || "https://agent.hery.cloud";
     const token = user?.token;
     if (!token) return;
-    const changed = new Set(changedPaths);
-    const hits = openTabsRef.current.filter(
+    // office 编辑器标签(agent 改了文件):重新拉字节 → 换新 editorUrl → 编辑器加载最新
+    const liveTab = openTabsRef.current.find(
       (t) =>
-        (t.htmlContent !== undefined || t.onlyofficeConfig !== undefined) &&
-        (changed.has(t.path) || changed.has(t.path.replace(/^attachment:/, "")))
+        t.livePreviewUrl !== undefined &&
+        (t.path === path || t.path === `office:${path}` || t.path === `attachment:${path}`)
     );
-    for (const tab of hits) {
-      void (async () => {
-        try {
-          if (tab.onlyofficeConfig !== undefined) {
-            if (tab.path.startsWith("attachment:")) {
-              const wsPath = tab.path.slice("attachment:".length);
-              const tid = threadIdRef.current;
-              if (!tid) return;
-              const { getOnlyOfficeThreadConfig } = await import("./lib/agentClient");
-              const oo = await getOnlyOfficeThreadConfig(baseUrl, token, tid, wsPath, "edit");
-              if (oo.enabled && oo.config) {
-                setOpenTabs((cur) =>
-                  cur.map((t) =>
-                    t.path === tab.path
-                      ? { ...t, onlyofficeConfig: { documentType: oo.documentType!, config: oo.config } }
-                      : t
-                  )
-                );
-              }
-            } else if (activeProjectId) {
-              const { getOnlyOfficeProjectConfig } = await import("./lib/projectApi");
-              const oo = await getOnlyOfficeProjectConfig(baseUrl, token, activeProjectId, tab.path, "edit");
-              if (oo.enabled && oo.config) {
-                setOpenTabs((cur) =>
-                  cur.map((t) =>
-                    t.path === tab.path
-                      ? { ...t, onlyofficeConfig: { documentType: oo.documentType!, config: oo.config } }
-                      : t
-                  )
-                );
-              }
-            }
-            return;
-          }
-          let html: string | null = null;
-          if (tab.path.startsWith("attachment:")) {
-            const wsPath = tab.path.slice("attachment:".length);
-            const tid = threadIdRef.current;
-            if (tid) {
-              const { previewAttachmentHtml } = await import("./lib/agentClient");
-              ({ html } = await previewAttachmentHtml(baseUrl, token, tid, wsPath));
-            }
-          } else if (activeProjectId) {
-            const { previewProjectFile } = await import("./lib/projectApi");
-            ({ html } = await previewProjectFile(baseUrl, token, activeProjectId, tab.path));
-          }
-          if (html) {
-            setOpenTabs((cur) =>
-              cur.map((t) => (t.path === tab.path ? { ...t, htmlContent: html } : t))
-            );
-          }
-        } catch {
-          // keep the stale render
+    if (liveTab && activeProjectId) {
+      try {
+        const { downloadProjectFileBytes } = await import("./lib/projectApi");
+        const {
+          openInOfficeService,
+          officeEditorUrl,
+          officeFileIdFromUrl,
+          fetchOfficeSessionBytes,
+          sameBytes,
+        } = await import("./lib/officePreview");
+        const bytes = await downloadProjectFileBytes(baseUrl, token, activeProjectId, path);
+        // 编辑器自己的保存(doc_edit/自动保存)也会触发 file_change:
+        // 编辑器内存字节 == 磁盘字节 → 是自我触发的变化,跳过重载
+        // (否则每次落盘都重载编辑器 tab,打断正在编辑的会话)
+        const fileId = officeFileIdFromUrl(liveTab.livePreviewUrl);
+        // force(tab-recycle 页级内存回收)时跳过比对强制重开——
+        // 编辑器内存字节==磁盘字节正是要回收的"已保存"状态
+        if (!force && fileId) {
+          const editorBytes = await fetchOfficeSessionBytes(fileId, liveTab.name);
+          if (editorBytes && (await sameBytes(editorBytes, bytes))) return;
         }
-      })();
+        const opened = await openInOfficeService(bytes, liveTab.name, path, { baseUrl, token, projectId: activeProjectId });
+        setOpenTabs((cur) =>
+          cur.map((t) => (t.path === liveTab.path ? { ...t, livePreviewUrl: officeEditorUrl(opened) } : t))
+        );
+      } catch { /* 刷新失败保持旧内容 */ }
+      return;
+    }
+    const tab = openTabsRef.current.find(
+      (t) =>
+        t.htmlContent !== undefined &&
+        (t.path === path || t.path === `attachment:${path}`)
+    );
+    if (!tab) return;
+    try {
+      let html: string | null = null;
+      if (tab.path.startsWith("attachment:")) {
+        const wsPath = tab.path.slice("attachment:".length);
+        const tid = threadIdRef.current;
+        if (tid) {
+          const { previewAttachmentHtml } = await import("./lib/agentClient");
+          ({ html } = await previewAttachmentHtml(baseUrl, token, tid, wsPath));
+        }
+      } else if (activeProjectId) {
+        const { previewProjectFile } = await import("./lib/projectApi");
+        ({ html } = await previewProjectFile(baseUrl, token, activeProjectId, tab.path));
+      }
+      if (html) {
+        setOpenTabs((cur) =>
+          cur.map((t) => (t.path === tab.path ? { ...t, htmlContent: html } : t))
+        );
+      }
+    } catch {
+      // keep the stale render
     }
   };
+
+  // Latest-fn ref so window-message callbacks can call the refresh above.
+  const refreshOfficeTabsRef = useRef(refreshOfficePreviewTabs);
+  refreshOfficeTabsRef.current = refreshOfficePreviewTabs;
+
+  const officeRefreshTimersRef = useRef<Map<string, number>>(new Map());
 
   // Open file from FileChangeCard (path + content string)
   const handleOpenFileFromCard = (path: string, content: string, pendingChange?: { toolCallId: string; originalContent: string | null }) => {
@@ -998,14 +1123,14 @@ export default function App() {
           },
         })
       );
-      // Refresh the file tree since files on disk changed
-      setFileTreeVersion(v => v + 1);
+      // File-tree refresh: the backend fs watcher pushes the change;
+      // no manual bump needed here.
     } catch (err: any) {
-      window.dispatchEvent(
-        new CustomEvent("app:show_toast", {
-          detail: {
-            type: "error",
-            title: t("撤销失败", "Revert failed"),
+          window.dispatchEvent(
+            new CustomEvent("app:show_toast", {
+              detail: {
+                type: "error",
+                title: t("撤销失败", "Revert failed"),
             description: err?.message || String(err),
           },
         })
@@ -1189,9 +1314,14 @@ export default function App() {
         const deltaItemId = data.itemId || data.item_id || "";
         const deltaText = data.delta || "";
         if (!deltaItemId || !deltaText) break;
+        // Match by id across ALL messages: answering an ask_user aborts the
+        // current stream and opens a new one bound to a NEW assistant
+        // message, but the pending tool block lives on the PREVIOUS message.
+        // Only a brand-new placeholder (no block anywhere yet) belongs to
+        // this stream's message.
+        let placeholderAdded = false;
         setMessages((prev) =>
           prev.map((m) => {
-            if (m.id !== aiMsgId) return m;
             const blocks = [...(m.blocks || [])];
             const idx = blocks.findIndex(
               (b) => b.kind === "tool" && b.id === deltaItemId
@@ -1206,9 +1336,12 @@ export default function App() {
                   status: "running" as const,
                 },
               };
-            } else {
+              return { ...m, blocks };
+            }
+            if (!placeholderAdded && m.id === aiMsgId) {
               // Legacy-backend compat: args delta before item_started →
               // placeholder in arrival position (name filled by item_started).
+              placeholderAdded = true;
               blocks.push({
                 kind: "tool",
                 id: deltaItemId,
@@ -1221,8 +1354,9 @@ export default function App() {
                   createdAt: now,
                 },
               });
+              return { ...m, blocks };
             }
-            return { ...m, blocks };
+            return m;
           })
         );
         break;
@@ -1242,9 +1376,13 @@ export default function App() {
           const execName = item.toolName || item.tool || "";
           const execCmd = item.command || "";
           const execArgs = typeof args === "string" ? args : JSON.stringify(args);
+          // Upsert by id across ALL messages — the placeholder may live on the
+          // previous message when the stream was replaced (ask_user answer
+          // swaps streams; block ids are globally unique backend call_ids).
+          // A brand-new card is only created on this stream's message.
+          let cardAdded = false;
           setMessages((prev) =>
             prev.map((m) => {
-              if (m.id !== aiMsgId) return m;
               const blocks = [...(m.blocks || [])];
               const idx = blocks.findIndex(
                 (b) => b.kind === "tool" && b.id === execId
@@ -1264,7 +1402,15 @@ export default function App() {
                     status: b.tool.status === "pending" ? "pending" : "running",
                   },
                 };
-              } else {
+                return {
+                  ...m,
+                  blocks,
+                  // Only the current stream's message carries live status.
+                  ...(m.id === aiMsgId ? { agentStatus: "executing_tool" as const } : {}),
+                };
+              }
+              if (!cardAdded && m.id === aiMsgId) {
+                cardAdded = true;
                 blocks.push({
                   kind: "tool",
                   id: execId,
@@ -1278,8 +1424,9 @@ export default function App() {
                     createdAt: now,
                   },
                 });
+                return { ...m, blocks, agentStatus: "executing_tool" };
               }
-              return { ...m, blocks, agentStatus: "executing_tool" };
+              return m;
             })
           );
         }
@@ -1287,6 +1434,35 @@ export default function App() {
       }
       case "item_completed": {
         const item = data.item || {};
+        if (item.type === "agent_message") {
+          const itemId = item.id || data.itemId || data.item_id || "agent-message-" + now;
+          const text = item.text != null ? String(item.text) : "";
+          const phase = item.phase || data.phase || undefined;
+          if (text) {
+            setMessages((prev) =>
+              prev.map((m) => {
+                if (m.id !== aiMsgId) return m;
+                let blocks = [...(m.blocks || [])];
+                const last = blocks[blocks.length - 1];
+                if (last && last.kind === "reasoning" && !last.endedAt) {
+                  blocks[blocks.length - 1] = { ...last, endedAt: now };
+                }
+                const idx = blocks.findIndex((b) => b.kind === "text" && b.id === itemId);
+                if (idx >= 0) {
+                  const b = blocks[idx];
+                  if (b.kind === "text") {
+                    blocks[idx] = { ...b, text, ...(phase ? { phase } : {}) };
+                  }
+                } else if (!blocks.some((b) => b.kind === "text" && b.text.trim() === text.trim())) {
+                  blocks.push({ kind: "text", id: itemId, text, ...(phase ? { phase } : {}) });
+                }
+                const nextText = m.text.includes(text) ? m.text : m.text ? m.text + "\n\n" + text : text;
+                return { ...m, blocks, text: nextText };
+              })
+            );
+          }
+          break;
+        }
         if (item.type === "command_execution") {
           const id = item.id || item.callId || "";
           const status: ToolExecution["status"] =
@@ -1296,32 +1472,80 @@ export default function App() {
           const errorReason = item.errorReason || "";
           const wasAborted = item.wasAborted === true;
           const args = item.arguments || null;
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === aiMsgId
-                ? {
-                    ...m,
-                    blocks: (m.blocks || []).map((b) => {
-                      if (b.kind !== "tool" || b.id !== id) return b;
-                      return {
-                        ...b,
-                        tool: {
-                          ...b.tool,
-                          status,
-                          result,
-                          errorReason,
-                          wasAborted,
-                          completedAt: now,
-                          ...(args ? { args: typeof args === "string" ? args : JSON.stringify(args) } : {}),
-                          ...(item.command ? { command: item.command, description: item.command } : {}),
-                          ...(Array.isArray(item.images) && item.images.length > 0 ? { images: item.images } : {}),
+          // Match by id across ALL messages — THE ask_user fix: answering an
+          // ask aborts this stream and reopens it bound to a NEW assistant
+          // message, but the ask_user tool block sits on the PREVIOUS
+          // message. Matching only the current stream's message left that
+          // card spinning "Executing..." forever after the user answered.
+          setMessages((prev) => {
+            let found = false;
+            const next = prev.map((m) => {
+              if (!(m.blocks || []).some((b) => b.kind === "tool" && b.id === id))
+                return m;
+              found = true;
+              return {
+                ...m,
+                blocks: (m.blocks || []).map((b) => {
+                  if (b.kind !== "tool" || b.id !== id) return b;
+                  return {
+                    ...b,
+                    tool: {
+                      ...b.tool,
+                      status,
+                      result,
+                      errorReason,
+                      wasAborted,
+                      completedAt: now,
+                      ...(args ? { args: typeof args === "string" ? args : JSON.stringify(args) } : {}),
+                      ...(item.command ? { command: item.command, description: item.command } : {}),
+                      ...(Array.isArray(item.images) && item.images.length > 0 ? { images: item.images } : {}),
+                    },
+                  };
+                }),
+              };
+            });
+            if (!found) {
+              // Backfill: this call's item_started / output deltas were
+              // dropped (backend queue backpressure drops structural events
+              // too). The completed event carries the full card info — build
+              // the block from it instead of leaving the tool call invisible.
+              return next.map((m) =>
+                m.id === aiMsgId
+                  ? {
+                      ...m,
+                      blocks: [
+                        ...(m.blocks || []),
+                        {
+                          kind: "tool",
+                          id,
+                          tool: {
+                            id,
+                            name: item.toolName || item.tool || "",
+                            command: item.command || "",
+                            args: args
+                              ? typeof args === "string"
+                                ? args
+                                : JSON.stringify(args)
+                              : "{}",
+                            description: item.command || "",
+                            status,
+                            result,
+                            errorReason,
+                            wasAborted,
+                            createdAt: now,
+                            completedAt: now,
+                            ...(Array.isArray(item.images) && item.images.length > 0
+                              ? { images: item.images }
+                              : {}),
+                          },
                         },
-                      };
-                    }),
-                  }
-                : m
-            )
-          );
+                      ],
+                    }
+                  : m
+              );
+            }
+            return next;
+          });
         }
         // file_change item — write_file / apply_patch completed with structured file list.
         // Attach by call id — never "last tool" (completions arrive unordered
@@ -1330,34 +1554,73 @@ export default function App() {
           const itemId = item.id || item.callId || "";
           const files = item.files || [];
           const stats = item.fileStats || { added: 0, removed: 0 };
-          // Refresh the file explorer since files changed on disk
-          setFileTreeVersion(v => v + 1);
+          // File-tree refresh: the backend fs watcher pushes disk changes,
+          // no manual bump here.
           // Re-render any open Office HTML preview tabs whose file just
           // changed on disk (e.g. the agent edited the docx being previewed).
           refreshOfficePreviewTabs(files.map((f: any) => String(f.path || "")));
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === aiMsgId
-                ? {
-                    ...m,
-                    blocks: (m.blocks || []).map((b) =>
-                      b.kind === "tool" && b.id === itemId
-                        ? {
-                            ...b,
-                            tool: {
-                              ...b.tool,
-                              files,
-                              fileStats: stats,
-                              status: "success" as const,
-                              completedAt: now,
-                            },
-                          }
-                        : b
-                    ),
-                  }
-                : m
-            )
-          );
+          setMessages((prev) => {
+            let found = false;
+            const next = prev.map((m) => {
+              if (!(m.blocks || []).some((b) => b.kind === "tool" && b.id === itemId))
+                return m;
+              found = true;
+              return {
+                ...m,
+                blocks: (m.blocks || []).map((b) =>
+                  b.kind === "tool" && b.id === itemId
+                    ? {
+                        ...b,
+                        tool: {
+                          ...b.tool,
+                          files,
+                          fileStats: stats,
+                          status: "success" as const,
+                          completedAt: now,
+                        },
+                      }
+                    : b
+                ),
+              };
+            });
+            if (!found) {
+              // Same backfill rule as command_execution: the call's earlier
+              // events were dropped — build the file-change card directly
+              // from the completed payload.
+              const fArgs = item.arguments || null;
+              return next.map((m) =>
+                m.id === aiMsgId
+                  ? {
+                      ...m,
+                      blocks: [
+                        ...(m.blocks || []),
+                        {
+                          kind: "tool",
+                          id: itemId,
+                          tool: {
+                            id: itemId,
+                            name: item.toolName || item.tool || "",
+                            command: item.command || "",
+                            args: fArgs
+                              ? typeof fArgs === "string"
+                                ? fArgs
+                                : JSON.stringify(fArgs)
+                              : "{}",
+                            description: item.command || "",
+                            status: "success" as const,
+                            createdAt: now,
+                            completedAt: now,
+                            files,
+                            fileStats: stats,
+                          },
+                        },
+                      ],
+                    }
+                  : m
+              );
+            }
+            return next;
+          });
         }
         // item_completed (agent_message) — blocks never depend on it; the
         // OpenAI protocol doesn't even emit it for tool-call rounds.
@@ -1412,9 +1675,10 @@ export default function App() {
         if (pendingInputRef.current?.inputId === inputId) {
           pendingInputRef.current = null;
         }
+        // Match by id across ALL messages (the ask card may sit on the
+        // previous message after a stream swap — same rule as item_completed).
         setMessages((prev) =>
           prev.map((m) => {
-            if (m.id !== aiMsgId) return m;
             let touched = false;
             const blocks = (m.blocks || []).map((b) => {
               if (b.kind === "ask" && b.id === inputId && !b.answers && !b.expired) {
@@ -1437,6 +1701,7 @@ export default function App() {
       }
       case "turn_complete": {
         // Mark streaming complete and record final message text
+        streamTerminalRef.current = true;
         const finalMsg = data.finalMessage || data.final_message || "";
         setMessages((prev) =>
           prev.map((m) => {
@@ -1454,18 +1719,29 @@ export default function App() {
                 ? { ...b, tool: { ...b.tool, completedAt: now } }
                 : b
             );
-            // If every text delta was dropped under backpressure, backfill the
-            // final message so the turn still shows its answer.
-            const hasText = blocks.some((b) => b.kind === "text" && b.text.trim().length > 0);
-            if (finalMsg && !hasText) {
-              blocks.push({ kind: "text", id: `final-${now}`, text: finalMsg });
+            // Codex-style final-answer safety net: the final assistant message
+            // may arrive as the terminal turn payload even if a preceding
+            // commentary text block already exists. Append it when that exact
+            // final text has not been rendered yet, so tool → final answer is
+            // never hidden behind earlier progress narration.
+            const finalAlreadyShown =
+              !!finalMsg &&
+              blocks.some((b) => b.kind === "text" && b.text.trim() === finalMsg.trim());
+            if (finalMsg && !finalAlreadyShown) {
+              blocks.push({ kind: "text", id: "final-" + now, text: finalMsg, phase: "final_answer" });
             }
+            const nextText =
+              finalMsg && !m.text.includes(finalMsg)
+                ? m.text
+                  ? m.text + "\n\n" + finalMsg
+                  : finalMsg
+                : m.text;
             return {
               ...m,
               blocks,
+              text: nextText,
               agentStatus: "completed",
               isStreaming: false,
-              ...(finalMsg && !m.text ? { text: finalMsg } : {}),
             };
           })
         );
@@ -1482,9 +1758,12 @@ export default function App() {
           ...prev,
           [approvalId]: { approvalId, toolName, arguments: args },
         }));
+        // Update the tool block by id across ALL messages (same cross-stream
+        // rule as item_completed); only a brand-new placeholder is created on
+        // this stream's message.
+        let approvalCardAdded = false;
         setMessages((prev) =>
           prev.map((m) => {
-            if (m.id !== aiMsgId) return m;
             const blocks = [...(m.blocks || [])];
             const idx = blocks.findIndex(
               (b) => b.kind === "tool" && b.id === approvalId
@@ -1500,9 +1779,12 @@ export default function App() {
                   name: b.tool.name || toolName,
                 },
               };
-            } else {
+              return { ...m, blocks };
+            }
+            if (!approvalCardAdded && m.id === aiMsgId) {
               // item_started may have been dropped under queue pressure —
               // create a placeholder tool block so the approval UI is reachable.
+              approvalCardAdded = true;
               blocks.push({
                 kind: "tool",
                 id: approvalId,
@@ -1514,9 +1796,40 @@ export default function App() {
                   createdAt: now,
                 },
               });
+              return { ...m, blocks };
             }
-            return { ...m, blocks };
+            return m;
           })
+        );
+        break;
+      }
+      case "office_live": {
+        // office_edit streaming started: the backend holds the document in
+        // an officecli resident and serves a live watch page (SSE) — swap
+        // any open tab for that file to the live view (same-origin proxy).
+        const livePath = data.path || "";
+        const livePort = Number(data.port || 0);
+        if (!livePath || !livePort) break;
+        setOpenTabs((cur) =>
+          cur.map((t) =>
+            t.path === livePath || t.path === `attachment:${livePath}`
+              ? { ...t, livePreviewUrl: `/officecli-watch/${livePort}/` }
+              : t
+          )
+        );
+        break;
+      }
+      case "office_live_end": {
+        // Streamed window over (committed or rolled back) — back to the
+        // static HTML preview; the commit's fs event refreshes it.
+        const livePath = data.path || "";
+        if (!livePath) break;
+        setOpenTabs((cur) =>
+          cur.map((t) =>
+            t.path === livePath || t.path === `attachment:${livePath}`
+              ? { ...t, livePreviewUrl: undefined }
+              : t
+          )
         );
         break;
       }
@@ -1537,6 +1850,7 @@ export default function App() {
         // Backend already maps raw provider payloads to one friendly line.
         // Show it as a transient toast — never append provider errors to
         // the chat transcript.
+        streamTerminalRef.current = true;
         const msg = data.message || data.error || t("模型服务暂时不可用，请稍后重试或切换模型", "Model service unavailable, please retry or switch models");
         window.dispatchEvent(
           new CustomEvent("app:show_toast", {
@@ -1559,6 +1873,58 @@ export default function App() {
       }
       default:
         break;
+    }
+  };
+
+  /** Run the agent SSE stream with mid-turn reconnect.
+   *
+   * A stream that ends or fails WITHOUT a terminal event (turn_complete /
+   * error) was cut mid-turn — network drop, proxy idle close, or a
+   * superseding connection. The turn keeps running on the backend, so we
+   * reconnect with Last-Event-ID (the backend replays buffered events since
+   * that seq; the seq guard in handleAgentEvent dedupes anything already
+   * applied) instead of silently marking the message complete, which used
+   * to make every tool call after the cut invisible.
+   *
+   * Retries are bounded so a second tab on the same thread (single-consumer
+   * SSE — each subscribe supersedes the previous) can't ping-pong forever.
+   * Throws (after exhaustion) so the caller's existing catch shows a toast.
+   */
+  const runAgentStream = async (
+    baseUrl: string,
+    token: string,
+    threadId: string,
+    aiMsgId: string,
+    controller: AbortController
+  ) => {
+    const MAX_RETRIES = 3;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await streamChat(
+          baseUrl,
+          token,
+          threadId,
+          (ev) => {
+            if (controller.signal.aborted) return;
+            handleAgentEvent(ev, aiMsgId);
+          },
+          controller.signal,
+          lastSeqRef.current
+        );
+        // Stream ended normally — only accept it if the backend said the
+        // turn is over. Otherwise treat as a cut and reconnect.
+        if (streamTerminalRef.current || controller.signal.aborted) return;
+      } catch (err: any) {
+        if (err?.name === "AbortError") throw err; // caller treats as superseded
+        if (controller.signal.aborted) throw err;
+        // Network-level failure — same treatment: retry while budget remains.
+      }
+      if (attempt >= MAX_RETRIES) {
+        throw new Error(
+          t("与服务器连接中断，已停止同步（后台任务可能仍在执行）", "Lost connection to server, sync stopped (the task may still be running)")
+        );
+      }
+      await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
     }
   };
 
@@ -1614,6 +1980,21 @@ export default function App() {
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
 
+    // Seal the pre-answer message: its stream ends here (the turn continues
+    // on the fresh stream/message below). Without this its isStreaming stays
+    // stuck true from the ask phase, keeping its tool cards in the live
+    // "streaming" presentation forever.
+    const preAnswerMsgId = activeAiMsgIdRef.current;
+    if (preAnswerMsgId) {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === preAnswerMsgId
+            ? { ...m, isStreaming: false, agentStatus: "completed" }
+            : m
+        )
+      );
+    }
+
     // The agent resumes after answering — open a fresh assistant message and
     // stream whatever it produces next, so the answered card stays in place
     // and new output appears below it.
@@ -1621,6 +2002,7 @@ export default function App() {
     const aiMsgId = (Date.now() + 1).toString();
     activeAiMsgIdRef.current = aiMsgId;
     lastSeqRef.current = 0; // resumed turn → new event stream
+    streamTerminalRef.current = false;
     const aiMsg: ChatMessage = {
       id: aiMsgId,
       sender: "ai",
@@ -1637,10 +2019,7 @@ export default function App() {
     abortControllerRef.current = controller;
 
     try {
-      await streamChat(baseUrl, token, threadId, (ev) => {
-        if (controller.signal.aborted) return;
-        handleAgentEvent(ev, aiMsgId);
-      }, controller.signal);
+      await runAgentStream(baseUrl, token, threadId, aiMsgId, controller);
       markThreadResolved(threadId);
       setMessages((prev) =>
         prev.map((m) =>
@@ -1738,8 +2117,7 @@ export default function App() {
           : t
       )
     );
-    // Refresh the file tree since files on disk changed
-    setFileTreeVersion(v => v + 1);
+    // File-tree refresh: the backend fs watcher pushes the change.
   };
 
   // Attachment preview: extract text server-side, then open it as a
@@ -1766,8 +2144,7 @@ export default function App() {
     const existing = openTabs.find((tab) => tab.path === tabPath);
     if (
       existing &&
-      (existing.onlyofficeConfig !== undefined ||
-        existing.htmlContent !== undefined ||
+      (existing.htmlContent !== undefined ||
         (existing.content && !existing.content.startsWith("// 正在解析")))
     ) {
       setActiveTabPath(tabPath);
@@ -1795,45 +2172,33 @@ export default function App() {
       }
     }
 
-    // Office documents (docx/xlsx/pptx) prefer the OnlyOffice interactive
-    // editor (edit + save-back); the OfficeCLI HTML render is the fallback;
-    // null html or any error falls back to the plain-text extract below.
+    // Office documents (docx/xlsx/pptx) render via the OfficeCLI HTML
+    // preview; null html or any error falls back to the plain-text extract.
     if (isOfficePreviewPath(att.workspacePath)) {
+      // Office 附件唯一预览方式:code-engine-office 真编辑器(不回退 OfficeCLI)
       try {
-        const { getOnlyOfficeThreadConfig } = await import("./lib/agentClient");
-        const oo = await getOnlyOfficeThreadConfig(baseUrl, token, threadId, att.workspacePath, "edit");
-        if (oo.enabled && oo.config) {
-          setOpenTabs((prev) => {
-            const next = prev.filter((tab) => tab.path !== tabPath);
-            return [
-              ...next,
-              {
-                path: tabPath,
-                name: att.filename,
-                content: "",
-                onlyofficeConfig: { documentType: oo.documentType!, config: oo.config },
-              },
-            ];
-          });
-          setActiveTabPath(tabPath);
-          return;
-        }
-      } catch {
-        // fall through to OfficeCLI preview
-      }
-      try {
-        const { previewAttachmentHtml } = await import("./lib/agentClient");
-        const { html } = await previewAttachmentHtml(baseUrl, token, threadId, att.workspacePath);
-        if (html) {
-          setOpenTabs((prev) => {
-            const next = prev.filter((tab) => tab.path !== tabPath);
-            return [...next, { path: tabPath, name: att.filename, content: "", htmlContent: html, readOnly: true }];
-          });
-          setActiveTabPath(tabPath);
-          return;
-        }
-      } catch {
-        // fall through to text extraction
+        const { openInOfficeService, officeEditorUrl } = await import("./lib/officePreview");
+        const dl = await apiFetch(
+          `${baseUrl}/api/chat/threads/${encodeURIComponent(threadId)}/attachments/download?path=${encodeURIComponent(att.workspacePath)}`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        if (!dl.ok) throw new Error(`下载失败 HTTP ${dl.status}`);
+        const opened = await openInOfficeService(await dl.arrayBuffer(), att.filename, att.workspacePath);
+        setOpenTabs((prev) => {
+          const next = prev.filter((tab) => tab.path !== tabPath);
+          return [...next, { path: tabPath, name: att.filename, content: "", livePreviewUrl: officeEditorUrl(opened), readOnly: true }];
+        });
+        setActiveTabPath(tabPath);
+        return;
+      } catch (e: any) {
+        setOpenTabs((prev) => {
+          const next = prev.filter((tab) => tab.path !== tabPath);
+          return [...next, { path: tabPath, name: att.filename, content: `// ❌ 文档预览失败: ${e?.message || e}
+// Office 附件统一由 code-engine-office 服务预览。
+// 请确认服务已启动: cd code-engine-office && npm run dev (端口 3200)`, readOnly: true }];
+        });
+        setActiveTabPath(tabPath);
+        return;
       }
     }
 
@@ -2069,6 +2434,7 @@ export default function App() {
     const aiMsgId = (Date.now() + 1).toString();
     activeAiMsgIdRef.current = aiMsgId;
     lastSeqRef.current = 0; // new turn → new event stream
+    streamTerminalRef.current = false;
     const aiMsg: ChatMessage = {
       id: aiMsgId,
       sender: "ai",
@@ -2107,10 +2473,8 @@ export default function App() {
       await sendMessage(baseUrl, token, threadId, modelId, outgoingText, approvalPolicy, skillIds, images);
 
       // 3. Stream agent events and render them onto the active message.
-      await streamChat(baseUrl, token, threadId, (ev) => {
-        if (controller.signal.aborted) return;
-        handleAgentEvent(ev, aiMsgId);
-      }, controller.signal);
+      // Reconnects automatically if the SSE connection is cut mid-turn.
+      await runAgentStream(baseUrl, token, threadId, aiMsgId, controller);
 
       // Mark the message complete when the stream ends normally.
       markThreadResolved(threadId);
@@ -2384,20 +2748,28 @@ export default function App() {
         <div className="flex-1 flex flex-col min-w-0 min-h-0 relative overflow-hidden">
           {/* Middle Main Workspace split: Chat Stage | Code Editor | File Explorer */}
           <div
+            ref={splitContainerRef}
+            style={
+              {
+                "--chat-w": `${chatWidth}px`,
+                "--right-w": `${rightPanelWidth}px`,
+              } as React.CSSProperties
+            }
             className={`flex-1 flex min-h-0 relative overflow-hidden ${
               isResizingChat || isResizingRight ? "select-none cursor-col-resize" : ""
             }`}
           >
-            {/* Chat Stage Pane */}
-            <motion.div
-              animate={{
-                width: openTabs.length > 0 
-                  ? `${chatWidth}px` 
-                  : rightPanelOpen 
-                    ? `calc(100% - ${rightPanelWidth}px)` 
+            {/* Chat Stage Pane — 宽度消费 CSS 变量,拖动时由 pointer handler 直写 var,
+                避免每帧 setState 全树重渲染;开合过渡交给 CSS transition */}
+            <div
+              style={{
+                width: openTabs.length > 0
+                  ? "var(--chat-w)"
+                  : rightPanelOpen
+                    ? "calc(100% - var(--right-w))"
                     : "100%",
+                transition: isResizingChat || isResizingRight ? "none" : "width 0.28s cubic-bezier(0.2, 0, 0, 1)",
               }}
-              transition={isResizingChat || isResizingRight ? { duration: 0 } : { duration: 0.28, ease: [0.2, 0, 0, 1] }}
               className="flex flex-col bg-[#ffffff] dark:bg-zinc-950 relative shrink-0 h-full"
             >
               <AnimatePresence mode="wait">
@@ -2540,7 +2912,7 @@ export default function App() {
                   )}
                 </motion.div>
               </AnimatePresence>
-            </motion.div>
+            </div>
 
             {/* Resizer 1 (Chat <-> Editor) */}
             <AnimatePresence>
@@ -2550,8 +2922,11 @@ export default function App() {
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
                   transition={{ duration: 0.2 }}
-                  onMouseDown={handleChatResizeStart}
-                  className={`w-[1px] relative bg-gray-200/90 dark:bg-[#222222] hover:bg-blue-500 active:bg-blue-600 cursor-col-resize shrink-0 z-30 transition-colors select-none ${
+                  onPointerDown={handleResizePointerDown("chat")}
+                  onPointerMove={handleResizePointerMove}
+                  onPointerUp={handleResizePointerEnd}
+                  onPointerCancel={handleResizePointerEnd}
+                  className={`w-[1px] relative bg-gray-200/90 dark:bg-[#222222] hover:bg-blue-500 active:bg-blue-600 cursor-col-resize shrink-0 z-30 transition-colors select-none touch-none ${
                     isResizingChat ? "bg-blue-600 w-[2px]" : ""
                   }`}
                   title={t("拖拽调整对话框与代码区宽度", "Drag to resize chat and editor")}
@@ -2569,8 +2944,11 @@ export default function App() {
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
                   transition={{ duration: 0.2 }}
-                  onMouseDown={handleRightResizeStart}
-                  className={`w-[1px] relative bg-gray-200/90 dark:bg-[#222222] hover:bg-blue-500 active:bg-blue-600 cursor-col-resize shrink-0 z-30 transition-colors select-none ${
+                  onPointerDown={handleResizePointerDown("right")}
+                  onPointerMove={handleResizePointerMove}
+                  onPointerUp={handleResizePointerEnd}
+                  onPointerCancel={handleResizePointerEnd}
+                  className={`w-[1px] relative bg-gray-200/90 dark:bg-[#222222] hover:bg-blue-500 active:bg-blue-600 cursor-col-resize shrink-0 z-30 transition-colors select-none touch-none ${
                     isResizingRight ? "bg-blue-600 w-[2px]" : ""
                   }`}
                   title={t("拖拽调整文件树宽度", "Drag to resize file tree")}
@@ -2580,21 +2958,19 @@ export default function App() {
               )}
             </AnimatePresence>
 
-            {/* Integrated Code Editor Pane */}
-            <AnimatePresence initial={false}>
+            {/* Integrated Code Editor Pane — 始终挂载,width 0↔calc 过渡实现开合动画 */}
+            <div
+              style={{
+                width: openTabs.length > 0
+                  ? rightPanelOpen
+                    ? "calc(100% - var(--chat-w) - var(--right-w))"
+                    : "calc(100% - var(--chat-w))"
+                  : "0px",
+                transition: isResizingChat || isResizingRight ? "none" : "width 0.28s cubic-bezier(0.2, 0, 0, 1)",
+              }}
+              className="flex flex-col min-w-0 h-full relative overflow-hidden shrink-0"
+            >
               {openTabs.length > 0 && (
-                <motion.div
-                  initial={{ width: 0, opacity: 0 }}
-                  animate={{
-                    width: rightPanelOpen
-                      ? `calc(100% - ${chatWidth + rightPanelWidth}px)`
-                      : `calc(100% - ${chatWidth}px)`,
-                    opacity: 1,
-                  }}
-                  exit={{ width: 0, opacity: 0 }}
-                  transition={isResizingChat || isResizingRight ? { duration: 0 } : { duration: 0.28, ease: [0.2, 0, 0, 1] }}
-                  className="flex flex-col min-w-0 h-full relative overflow-hidden shrink-0"
-                >
                   <CodeEditor
                     tabs={openTabs}
                     activeTabPath={activeTabPath}
@@ -2609,54 +2985,10 @@ export default function App() {
                         tab.path.startsWith("attachment:") ? tab.path.slice("attachment:".length) : undefined
                       )
                     }
-                    onOnlyOfficeUnavailable={(tabPath) => {
-                      // DS 挂了/api.js 加载失败：剥掉编辑器配置，回退 OfficeCLI 静态预览
-                      const baseUrl = backendApiUrl || "https://agent.hery.cloud";
-                      const token = user?.token;
-                      void (async () => {
-                        if (!token) return;
-                        setOpenTabs((cur) =>
-                          cur.map((t) =>
-                            t.path === tabPath
-                              ? { ...t, onlyofficeConfig: undefined, content: "// 正在渲染文档…", readOnly: true }
-                              : t
-                          )
-                        );
-                        try {
-                          if (tabPath.startsWith("attachment:")) {
-                            const { previewAttachmentHtml } = await import("./lib/agentClient");
-                            const wsPath = tabPath.slice("attachment:".length);
-                            const tid = threadIdRef.current;
-                            if (!tid) return;
-                            const { html } = await previewAttachmentHtml(baseUrl, token, tid, wsPath);
-                            if (html) {
-                              setOpenTabs((cur) =>
-                                cur.map((t) => (t.path === tabPath ? { ...t, htmlContent: html } : t))
-                              );
-                            }
-                          } else if (activeProjectId) {
-                            const { previewProjectFile } = await import("./lib/projectApi");
-                            const { html } = await previewProjectFile(baseUrl, token, activeProjectId, tabPath);
-                            if (html) {
-                              setOpenTabs((cur) =>
-                                cur.map((t) => (t.path === tabPath ? { ...t, htmlContent: html } : t))
-                              );
-                            }
-                          }
-                        } catch {
-                          // OfficeCLI also unavailable — leave the placeholder
-                        }
-                      })();
-                    }}
-                    onOnlyOfficeSaved={() => {
-                      // DS 保存回写已落盘（后端无 SSE 推送），主动刷文件树
-                      setFileTreeVersion((v) => v + 1);
-                    }}
                     projectId={activeProjectId}
                   />
-                </motion.div>
               )}
-            </AnimatePresence>
+            </div>
 
             {/* Resizer 2 (Editor <-> Right Panel) */}
             <AnimatePresence>
@@ -2666,8 +2998,11 @@ export default function App() {
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
                   transition={{ duration: 0.2 }}
-                  onMouseDown={handleRightResizeStart}
-                  className={`w-[1px] relative bg-gray-200/90 dark:bg-[#222222] hover:bg-blue-500 active:bg-blue-600 cursor-col-resize shrink-0 z-30 transition-colors select-none ${
+                  onPointerDown={handleResizePointerDown("right")}
+                  onPointerMove={handleResizePointerMove}
+                  onPointerUp={handleResizePointerEnd}
+                  onPointerCancel={handleResizePointerEnd}
+                  className={`w-[1px] relative bg-gray-200/90 dark:bg-[#222222] hover:bg-blue-500 active:bg-blue-600 cursor-col-resize shrink-0 z-30 transition-colors select-none touch-none ${
                     isResizingRight ? "bg-blue-600 w-[2px]" : ""
                   }`}
                   title={t("拖拽调整代码区与文件树宽度", "Drag to resize editor and file tree")}
@@ -2687,8 +3022,14 @@ export default function App() {
               projectId={activeProjectId || undefined}
               width={rightPanelWidth}
               fileTreeVersion={fileTreeVersion}
+              resizing={isResizingChat || isResizingRight}
             />
           </div>
+
+          {/* 拖动中:全屏透明遮罩盖住 iframe,指针样式稳定,capture 失效时也兜底 */}
+          {(isResizingChat || isResizingRight) && (
+            <div className="fixed inset-0 z-[200] cursor-col-resize" />
+          )}
 
           {/* Bottom Dock Control Bar (to toggle terminal) */}
           {!terminalOpen && (

@@ -23,6 +23,10 @@ import { ContextPill, CommandItem } from "../types";
 import { PlusMenu, ModelMenu } from "./ContextPopovers";
 import { RECOMMENDATION_CARDS } from "../data/mockData";
 import { getUserSkills, UserSkill } from "../lib/skillApi";
+import { transcribeAudio, startAsrStream, AsrStreamController, AsrStreamError } from "../lib/asrApi";
+
+/** 麦克风状态机:idle → connecting → listening →(点停/60s)finalizing → idle */
+type MicState = "idle" | "connecting" | "listening" | "finalizing";
 
 interface PromptInputProps {
   onSend: (text: string, pills: ContextPill[], mode: string, model: string, images?: string[]) => void;
@@ -50,7 +54,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({
   onUploadAttachment,
 }) => {
   const { t, defaultModel, agentThinking, backendModels, backendApiUrl, user } = useSettings();
-  const { showError } = useToast();
+  const { showError, showInfo } = useToast();
   const [inputText, setInputText] = useState("");
   const [contextPills, setContextPills] = useState<ContextPill[]>([]);
 
@@ -76,7 +80,6 @@ export const PromptInput: React.FC<PromptInputProps> = ({
   // Popover toggle states
   const [showPlusMenu, setShowPlusMenu] = useState(false);
   const [showModelMenu, setShowModelMenu] = useState(false);
-  const [isListening, setIsListening] = useState(false);
   const [skills, setSkills] = useState<UserSkill[]>([]);
 
   // Autocomplete popup states
@@ -354,18 +357,187 @@ export const PromptInput: React.FC<PromptInputProps> = ({
     setContextPills(contextPills.filter((p) => p.id !== id));
   };
 
-  const toggleMic = () => {
-    if (isListening) {
-      setIsListening(false);
-    } else {
-      setIsListening(true);
-      // Simulate speech recognition input
-      setTimeout(() => {
-        setInputText((prev) => prev + t(" 请帮我使用 TypeScript 优化核心算法模块", " Please help me optimize core algorithm modules using TypeScript"));
-        setIsListening(false);
-      }, 1500);
+  // ===== 语音输入:流式 ASR —— 实时 partial 写入输入框,说完 final 校正落定;
+  // WS 流式不可用时自动降级为 MediaRecorder 录整段 → POST 批量识别 =====
+  const [micState, setMicState] = useState<MicState>("idle");
+  const micStateRef = useRef<MicState>("idle"); // WS 回调闭包里 state 是旧的,读 ref
+  const updateMicState = (s: MicState) => {
+    micStateRef.current = s;
+    setMicState(s);
+  };
+  const micModeRef = useRef<"stream" | "batch" | null>(null);
+  const asrControllerRef = useRef<AsrStreamController | null>(null);
+  const prevPartialRef = useRef(""); // 当前已写入输入框的 partial(后缀锚点)
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const autoStopTimerRef = useRef<number | null>(null);
+
+  const stopTracks = () => {
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+  };
+
+  const clearAutoStop = () => {
+    if (autoStopTimerRef.current !== null) {
+      window.clearTimeout(autoStopTimerRef.current);
+      autoStopTimerRef.current = null;
     }
   };
+
+  /** 用新识别文本替换输入框里的旧 partial。三分支保证用户在录音中手动打字/编辑不被吞掉。 */
+  const applyPartial = (text: string) => {
+    const pp = prevPartialRef.current;
+    setInputText((prev) => {
+      if (pp && prev.endsWith(pp)) return prev.slice(0, prev.length - pp.length) + text; // 正常:剥旧缀贴新缀
+      if (text.startsWith(pp)) return prev + text.slice(pp.length); // 锚点失效但可算增量:只贴增量
+      return prev + text; // 极端:整段追加(可能轻度重复,可接受)
+    });
+    prevPartialRef.current = text;
+  };
+
+  /** final 落定:同后缀替换;空串不动框(prevPartial 照常清零)。 */
+  const applyFinal = (rawText: string) => {
+    const text = rawText.trim();
+    const pp = prevPartialRef.current;
+    prevPartialRef.current = "";
+    if (!text) return;
+    setInputText((prev) => {
+      if (pp && prev.endsWith(pp)) return prev.slice(0, prev.length - pp.length) + text;
+      if (text.startsWith(pp)) return prev + text.slice(pp.length);
+      return prev + text;
+    });
+  };
+
+  const finishRecording = () => {
+    clearAutoStop();
+    recorderRef.current?.stop(); // 真正的转写在 onstop 里做
+  };
+
+  /** 降级路径:原 MediaRecorder 录整段 → transcribeAudio 批量识别 → 追加到输入框。 */
+  const startBatchRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+      });
+      streamRef.current = stream;
+      const mimeType = ["audio/webm", "audio/mp4"].find((t) => MediaRecorder.isTypeSupported(t));
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      recorderRef.current = recorder;
+      chunksRef.current = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data);
+      };
+      recorder.onstop = async () => {
+        stopTracks();
+        recorderRef.current = null;
+        const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
+        chunksRef.current = [];
+        if (blob.size === 0) {
+          updateMicState("idle");
+          return;
+        }
+        updateMicState("finalizing");
+        try {
+          const text = (await transcribeAudio(blob)).trim();
+          if (text) setInputText((prev) => prev + text);
+        } catch (e) {
+          showError(t("语音识别失败", "Speech recognition failed"), e instanceof Error ? e.message : String(e));
+        } finally {
+          updateMicState("idle");
+        }
+      };
+      recorder.start();
+      micModeRef.current = "batch";
+      updateMicState("listening");
+      // 60s 自动结束,防止忘关麦克风
+      autoStopTimerRef.current = window.setTimeout(finishRecording, 60_000);
+    } catch (e) {
+      stopTracks();
+      updateMicState("idle");
+      showError(t("无法启动录音", "Cannot start recording"), e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  /** 收音中途掉线才提示收尾;finalizing 阶段的错误由 stopMic 的 null 分支统一处理,避免双 toast。 */
+  const handleStreamError = (err: AsrStreamError) => {
+    if (micStateRef.current !== "listening" || micModeRef.current !== "stream") return;
+    clearAutoStop();
+    asrControllerRef.current?.close();
+    asrControllerRef.current = null;
+    micModeRef.current = null;
+    updateMicState("idle");
+    showError(
+      t("语音连接已中断", "Speech connection lost"),
+      err.code === "bad-key" ? t("语音服务密钥无效", "Invalid ASR key") : t("已保留实时识别的文本", "Live transcript kept"),
+    );
+  };
+
+  const stopMic = async () => {
+    const controller = asrControllerRef.current;
+    if (!controller) return;
+    clearAutoStop();
+    asrControllerRef.current = null;
+    micModeRef.current = null;
+    updateMicState("finalizing");
+    const finalText = await controller.stop(); // 内部已关麦/flush/发 stop/收尾
+    if (finalText === null) {
+      showError(t("未获得最终识别结果", "No final transcript"), t("已保留实时识别的文本", "Live transcript kept"));
+    } else {
+      applyFinal(finalText);
+    }
+    updateMicState("idle");
+  };
+
+  const startMic = async () => {
+    updateMicState("connecting");
+    try {
+      const controller = await startAsrStream({
+        onPartial: applyPartial, // final 落定统一由 stop() 返回值处理,不挂 onFinal
+        onError: handleStreamError,
+      });
+      asrControllerRef.current = controller;
+      micModeRef.current = "stream";
+      updateMicState("listening");
+      // 60s 自动结束,防止忘关麦克风
+      autoStopTimerRef.current = window.setTimeout(() => {
+        if (micModeRef.current === "stream") void stopMic();
+        else finishRecording();
+      }, 60_000);
+    } catch (e) {
+      if (e instanceof AsrStreamError && ["ws-connect", "funasr-unavailable", "not-supported"].includes(e.code)) {
+        // 实时服务不可用/浏览器不支持 → 静默降级为录整段批量识别
+        showInfo(t("已切换为录音后识别", "Switched to record-then-transcribe"), t("实时语音服务不可用", "Live speech service unavailable"));
+        await startBatchRecording();
+      } else {
+        updateMicState("idle");
+        showError(t("无法启动录音", "Cannot start recording"), e instanceof Error ? e.message : String(e));
+      }
+    }
+  };
+
+  const toggleMic = async () => {
+    const s = micStateRef.current;
+    if (s === "connecting" || s === "finalizing") return; // 防重入
+    if (s === "listening") {
+      if (micModeRef.current === "stream") void stopMic();
+      else finishRecording();
+      return;
+    }
+    await startMic();
+  };
+
+  // 卸载时释放录音资源(防止组件切走后麦克风一直开着)
+  useEffect(
+    () => () => {
+      clearAutoStop();
+      asrControllerRef.current?.close(); // 立即放弃,不等 final
+      asrControllerRef.current = null;
+      if (recorderRef.current?.state === "recording") recorderRef.current.stop();
+      stopTracks();
+    },
+    []
+  );
 
   return (
     <div className="w-full max-w-3xl mx-auto relative font-sans">
@@ -594,15 +766,35 @@ export const PromptInput: React.FC<PromptInputProps> = ({
             {/* Mic & Send/Stop Buttons */}
             <div className="flex items-center gap-1.5">
               <button
+                type="button"
                 onClick={toggleMic}
+                disabled={micState === "finalizing"}
                 className={`w-8 h-8 flex items-center justify-center rounded-lg border transition-all ${
-                  isListening
-                    ? "bg-rose-100 dark:bg-rose-950/80 border-rose-300 text-rose-600 dark:text-rose-400 animate-pulse"
-                    : "bg-white dark:bg-zinc-900 border-gray-200 dark:border-zinc-700 text-gray-600 dark:text-zinc-300 hover:bg-gray-50 dark:hover:bg-zinc-800"
+                  micState === "finalizing"
+                    ? "bg-white dark:bg-zinc-900 border-gray-200 dark:border-zinc-700 text-gray-400 dark:text-zinc-500 cursor-wait"
+                    : micState === "listening"
+                    ? "bg-rose-100 dark:bg-rose-950/80 border-rose-300 text-rose-600 dark:text-rose-400 animate-pulse cursor-pointer"
+                    : "bg-white dark:bg-zinc-900 border-gray-200 dark:border-zinc-700 text-gray-600 dark:text-zinc-300 hover:bg-gray-50 dark:hover:bg-zinc-800 cursor-pointer"
                 }`}
-                title={t("语音输入", "Voice Input")}
+                title={
+                  micState === "connecting"
+                    ? t("连接语音服务…", "Connecting speech service…")
+                    : micState === "listening"
+                    ? micModeRef.current === "batch"
+                      ? t("结束录音并转文字", "Stop recording and transcribe")
+                      : t("实时识别中,点击结束", "Live transcribing — click to stop")
+                    : micState === "finalizing"
+                    ? micModeRef.current === "batch"
+                      ? t("转写中…", "Transcribing…")
+                      : t("正在生成最终文本…", "Finalizing transcript…")
+                    : t("语音输入", "Voice Input")
+                }
               >
-                <Mic className="w-4 h-4" />
+                {micState === "connecting" || micState === "finalizing" ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Mic className="w-4 h-4" />
+                )}
               </button>
 
               {isGenerating ? (

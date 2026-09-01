@@ -267,8 +267,9 @@ export const LoginPage: React.FC = () => {
   const { showSuccess, showError } = useToast();
 
   // Form states
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
+  // 暂时预填本地开发账号(方便调试;上线前移除)
+  const [email, setEmail] = useState("508816739@qq.com");
+  const [password, setPassword] = useState("123456");
   const [showPassword, setShowPassword] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 

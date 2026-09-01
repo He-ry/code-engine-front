@@ -332,34 +332,60 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = ({
       return;
     }
     setIsConnecting(true);
-    // Fresh status line: clear first — a leading \r\n leaves a blank first
-    // line on an empty terminal, and appending without it would glue the
-    // hint onto a running prompt.
+    // The "creating" hint must land on the NEW terminal's screen, not the
+    // currently-active one. There is one shared xterm instance, so: add a
+    // placeholder tab, make it active (that viewport is what the user sees),
+    // and detach the previous terminal's WS so its output cannot stream into
+    // the hint while the create request is in flight.
+    const prevId = activeIdRef.current;
+    const placeholderId = `pending-${Date.now()}`;
+    disconnectWs();
+    setTabs((prev) => [...prev, { id: placeholderId, name: `Term ${prev.length + 1}`, exited: false }]);
+    setActiveId(placeholderId);
     termRef.current?.clear();
     termRef.current?.writeln("\x1b[36m正在创建终端…\x1b[0m");
     try {
-      const term = termRef.current;
       // xterm can report tiny dimensions before the panel finishes layout
       // (e.g. rows=1 during the open animation) — clamp to sane minimums.
-      const cols = Math.max(20, term?.cols ?? 80);
-      const rows = Math.max(5, term?.rows ?? 24);
+      const cols = Math.max(20, termRef.current?.cols ?? 80);
+      const rows = Math.max(5, termRef.current?.rows ?? 24);
       const { terminal_id } = await createTerminal(baseUrl, user.token, projectId, undefined, cols, rows);
-      const name = `Term ${tabs.length + 1}`;
-      setTabs((prev) => [...prev, { id: terminal_id, name, exited: false }]);
-      setActiveId(terminal_id);
-      // Give xterm a tick to render before connecting
-      requestAnimationFrame(() => connectWs(terminal_id));
+      setTabs((prev) =>
+        prev.map((t) => (t.id === placeholderId ? { ...t, id: terminal_id } : t))
+      );
+      // Only take over the viewport if the user didn't switch tabs while the
+      // request was in flight; otherwise the tab stays idle until clicked.
+      if (activeIdRef.current === placeholderId) {
+        setActiveId(terminal_id);
+        // Give xterm a tick to render before connecting
+        requestAnimationFrame(() => connectWs(terminal_id));
+      }
     } catch (e: any) {
-      termRef.current?.writeln(`\x1b[31mFailed to create terminal: ${e?.message || e}\x1b[0m`);
+      // Drop the placeholder; restore whatever the user is looking at.
+      if (activeIdRef.current === placeholderId) {
+        termRef.current?.writeln(`\x1b[31mFailed to create terminal: ${e?.message || e}\x1b[0m`);
+      }
+      setTabs((prev) => prev.filter((t) => t.id !== placeholderId));
+      if (activeIdRef.current === placeholderId) {
+        if (prevId) {
+          setActiveId(prevId);
+          requestAnimationFrame(() => connectWs(prevId));
+        } else {
+          setActiveId(null);
+          termRef.current?.writeln("\x1b[90mNo terminal — click + to create one\x1b[0m\r\n");
+        }
+      }
     } finally {
       setIsConnecting(false);
     }
-  }, [projectId, user?.token, baseUrl, tabs.length, connectWs]);
+  }, [projectId, user?.token, baseUrl, connectWs, disconnectWs]);
 
   // Switch active terminal
   const handleSelectTab = useCallback(
     (id: string) => {
       if (id === activeId) return;
+      // Placeholder tab (terminal still being created) has no WS to connect.
+      if (id.startsWith("pending-")) return;
       disconnectWs();
       termRef.current?.clear();
       setActiveId(id);

@@ -35,7 +35,6 @@ import {
   Home,
 } from "lucide-react";
 import { OpenTab } from "../types";
-import OnlyOfficeEditor from "./OnlyOfficeEditor";
 
 // ── highlight.js syntax highlighting ──
 import hljs from "highlight.js/lib/core";
@@ -94,11 +93,6 @@ interface CodeEditorProps {
   onRevertFile?: (path: string, originalContent: string | null) => void;
   /** Download the source file of a read-only preview tab (attachments). */
   onDownloadTab?: (tab: OpenTab) => void;
-  /** OnlyOffice DS unreachable — strip the editor config and re-run the
-   *  OfficeCLI HTML preview fallback for that tab. */
-  onOnlyOfficeUnavailable?: (tabPath: string) => void;
-  /** OnlyOffice save-back landed on disk — refresh file trees etc. */
-  onOnlyOfficeSaved?: (tabPath: string) => void;
   projectId?: string;
 }
 
@@ -118,8 +112,6 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   onKeepFile,
   onRevertFile,
   onDownloadTab,
-  onOnlyOfficeUnavailable,
-  onOnlyOfficeSaved,
   projectId,
 }) => {
   const { t, backendApiUrl, user } = useSettings();
@@ -406,12 +398,12 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   const isPreviewTab = !!activeTab?.readOnly;
   const effectiveReadOnly = isPreviewTab || isReadOnly;
 
-  // 非代码类标签(OnlyOffice / HTML 预览 / PDF / 图片 / 浏览器)不展示代码编辑工具,
+  // 非代码类标签(实时 Office 预览 / HTML 预览 / PDF / 图片 / 浏览器)不展示代码编辑工具,
   // 只保留 刷新 / 独立卡片预览 / 最大化(关闭走标签条上的 X)。
   const isRichTab =
     isImageFile ||
     isBrowserTab ||
-    !!activeTab?.onlyofficeConfig ||
+    activeTab?.livePreviewUrl !== undefined ||
     activeTab?.pdfUrl !== undefined ||
     activeTab?.htmlContent !== undefined;
 
@@ -869,7 +861,6 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
           <button
             onClick={() => {
               setIsMaximized(!isMaximized);
-              showToast(!isMaximized ? t("进入全屏最大化", "Maximized editor") : t("退出全屏", "Exited maximized"));
             }}
             className="p-1 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded transition-colors cursor-pointer"
             title={isMaximized ? t("还原编辑器大小", "Restore Size") : t("最大化全屏编辑器", "Maximize Editor")}
@@ -1145,17 +1136,35 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
           <>
             {/* Primary Code Editor */}
             <div className="flex-1 flex min-h-0 relative overflow-hidden">
-              {/* OnlyOffice interactive editor (edit + save-back). Takes
-                  precedence over the static HTML preview. */}
-              {activeTab.onlyofficeConfig ? (
-                <div className="flex-1 min-h-0 bg-white dark:bg-zinc-900">
-                  <OnlyOfficeEditor
-                    config={activeTab.onlyofficeConfig.config}
-                    onUnavailable={() => onOnlyOfficeUnavailable?.(activeTab.path)}
-                    onSaved={() => onOnlyOfficeSaved?.(activeTab.path)}
-                  />
+              {/* Live officecli watch view (agent streaming edits, SSE). No
+                  sandbox attr — the watch page needs scripts + SSE. */
+              /* Office 编辑器改用下方覆盖层常驻,见「Office 编辑器标签层」 */}
+              {/* Office 编辑器标签层:所有已打开的 office 标签保持挂载(覆盖层),
+                  切换标签/切到代码页都只做显示隐藏 —— 条件渲染会卸载 iframe
+                  导致 700MB 编辑器整页重载 */}
+              {tabs.some((t) => t.livePreviewUrl) && (
+                <div
+                  className="absolute inset-0 z-10 bg-white dark:bg-zinc-900"
+                  style={{ display: activeTab.livePreviewUrl ? "block" : "none" }}
+                >
+                  {tabs
+                    .filter((t) => t.livePreviewUrl)
+                    .map((t) => (
+                      <div
+                        key={t.path}
+                        className="absolute inset-0"
+                        style={{ display: t.path === activeTab.path ? "block" : "none" }}
+                      >
+                        <iframe
+                          src={t.livePreviewUrl}
+                          title={t.name}
+                          className="w-full h-full border-0 block"
+                        />
+                      </div>
+                    ))}
                 </div>
-              ) : activeTab.htmlContent !== undefined ? (
+              )}
+              {activeTab.livePreviewUrl ? null : activeTab.htmlContent !== undefined ? (
                 <div className="flex-1 min-h-0 bg-white dark:bg-zinc-900">
                   <iframe
                     srcDoc={activeTab.htmlContent}
@@ -1405,14 +1414,12 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
             <div className="flex-1 flex min-h-0 bg-white dark:bg-[#0a0a0a] relative overflow-hidden">
               {isRichTab ? (
                 <div className="flex-1 min-h-0 flex items-center justify-center bg-[#fafafa] dark:bg-[#0b0b0b]">
-                  {activeTab.onlyofficeConfig ? (
-                    <div className="flex-1 h-full bg-white dark:bg-zinc-900">
-                      <OnlyOfficeEditor
-                        config={activeTab.onlyofficeConfig.config}
-                        onUnavailable={() => onOnlyOfficeUnavailable?.(activeTab.path)}
-                        onSaved={() => onOnlyOfficeSaved?.(activeTab.path)}
-                      />
-                    </div>
+                  {activeTab.livePreviewUrl ? (
+                    <iframe
+                      src={activeTab.livePreviewUrl}
+                      title={activeTab.name}
+                      className="w-full h-full border-0 block bg-white"
+                    />
                   ) : isImageFile ? (
                     imageDataUrl ? (
                       <img

@@ -95,7 +95,7 @@ export function isOfficePreviewPath(path: string): boolean {
 }
 
 /** True for PDF files — previewed with the browser's built-in PDF viewer
- *  (iframe), NOT OnlyOffice (which only covers docx/xlsx/pptx). */
+ *  (iframe) for any file type the browser can render. */
 export function isPdfPath(path: string): boolean {
   return path.toLowerCase().endsWith(".pdf");
 }
@@ -135,35 +135,6 @@ export async function previewAttachmentHtml(
   const json = await res.json();
   const d = json?.data ?? json;
   return { filename: d.filename ?? "", html: d.html ?? null };
-}
-
-/** OnlyOffice editor config for a thread workspace file (interactive edit
- *  with save-back). enabled=false → caller falls back to the OfficeCLI
- *  HTML preview. */
-export interface OnlyOfficeConfigResult {
-  enabled: boolean;
-  documentType?: string;
-  config?: Record<string, unknown>;
-}
-
-export async function getOnlyOfficeThreadConfig(
-  baseUrl: string,
-  token: string,
-  threadId: string,
-  workspacePath: string,
-  mode: "edit" | "view" = "edit",
-): Promise<OnlyOfficeConfigResult> {
-  const params = new URLSearchParams({
-    thread_id: threadId,
-    path: workspacePath,
-    mode,
-  });
-  const res = await apiFetch(`${baseUrl}/api/onlyoffice/editor-config?${params}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!res.ok) throw new Error(await detail(res));
-  const json = await res.json();
-  return json?.data ?? { enabled: false };
 }
 
 /** Download a raw workspace file (uploaded attachment or agent-generated
@@ -389,6 +360,10 @@ export async function sendMessage(
  * Invokes `onEvent` per parsed event. Resolves when the stream ends
  * (turn_complete / error / abort).
  *
+ * Pass `lastEventId` (the highest event seq seen on a previous connection)
+ * to reconnect: the backend replays buffered events since that seq before
+ * the live stream, so a mid-turn disconnect doesn't lose tool events.
+ *
  * NOTE: this deliberately uses raw `fetch`, NOT `apiFetch` — apiFetch calls
  * `clone().json()` on the body, which would block on (and consume) an
  * infinite SSE stream. We handle 401 here ourselves.
@@ -398,11 +373,14 @@ export async function streamChat(
   token: string,
   threadId: string,
   onEvent: (event: AgentStreamEvent) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  lastEventId?: number
 ): Promise<void> {
+  const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+  if (lastEventId && lastEventId > 0) headers["Last-Event-ID"] = String(lastEventId);
   const res = await fetch(
     `${baseUrl}/api/chat/threads/${encodeURIComponent(threadId)}/stream`,
-    { headers: { Authorization: `Bearer ${token}` }, signal }
+    { headers, signal }
   );
   if (res.status === 401 || res.status === 403) {
     // Reuse the global session-expiry handler.

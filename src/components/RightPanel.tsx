@@ -1,5 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
-import { motion, AnimatePresence } from "motion/react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useSettings } from "../context/SettingsContext";
 import {
   Folder,
@@ -22,7 +21,7 @@ import {
   Monitor,
 } from "lucide-react";
 import { FileNode } from "../types";
-import { listFiles, readFile, getPreviewUrl, siteUrl } from "../lib/projectApi";
+import { listFiles, readFile, getPreviewUrl, siteUrl, streamFsEvents } from "../lib/projectApi";
 
 interface RightPanelProps {
   isOpen: boolean;
@@ -33,6 +32,8 @@ interface RightPanelProps {
   projectId?: string;
   width?: number;
   fileTreeVersion?: number;
+  /** 分割条拖动中:关闭 width 过渡,面板跟随 CSS 变量实时变化不拖尾 */
+  resizing?: boolean;
 }
 
 export const RightPanel: React.FC<RightPanelProps> = ({
@@ -44,6 +45,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({
   projectId,
   width = 320,
   fileTreeVersion = 0,
+  resizing = false,
 }) => {
   const { t, backendApiUrl, user } = useSettings();
   const [activeTab, setActiveTab] = useState<"explorer" | "search" | "git" | "browser">(
@@ -98,17 +100,20 @@ export const RightPanel: React.FC<RightPanelProps> = ({
     setIframeUrl(url);
   }, [projectId, baseUrl, t]);
 
-  // Load files for a given path
+  // Load files for a given path. `force` bypasses the already-loaded cache —
+  // used by the fs-event incremental refresh below.
   const loadPath = useCallback(
-    async (path: string) => {
+    async (path: string, force = false) => {
       if (!projectId || !token) return;
 
-      let alreadyLoaded = false;
-      setFileTree((prev) => {
-        if (prev[path]) alreadyLoaded = true;
-        return prev;
-      });
-      if (alreadyLoaded) return;
+      if (!force) {
+        let alreadyLoaded = false;
+        setFileTree((prev) => {
+          if (prev[path]) alreadyLoaded = true;
+          return prev;
+        });
+        if (alreadyLoaded) return;
+      }
 
       setLoadingPaths((prev) => ({ ...prev, [path]: true }));
       setExplorerError(null);
@@ -131,6 +136,37 @@ export const RightPanel: React.FC<RightPanelProps> = ({
     [projectId, token, baseUrl]
   );
 
+  // Mirror of loaded paths for async flows (fs events arrive outside render).
+  const fileTreeRef = useRef<Record<string, FileNode[]>>({});
+  useEffect(() => {
+    fileTreeRef.current = fileTree;
+  }, [fileTree]);
+
+  // Normalize a workspace dir key for comparison ("./src" ≡ "src" ≡ "src/").
+  const normDir = (p: string) => p.replace(/^\.\//, "").replace(/\/+$/, "") || ".";
+
+  // Live workspace changes: subscribe to the backend fs-event stream while
+  // the explorer is visible and re-pull ONLY the affected, already-loaded
+  // directories — expansion state is preserved (mainstream-editor model:
+  // server watches disk, pushes "dir changed"; client lazily re-fetches).
+  useEffect(() => {
+    if (!isOpen || activeTab !== "explorer" || !projectId || !token) return;
+    const controller = new AbortController();
+    streamFsEvents(baseUrl, token, projectId, (paths) => {
+      const affected = new Set(paths.map(normDir));
+      Object.keys(fileTreeRef.current).forEach((loaded) => {
+        if (affected.has(normDir(loaded))) {
+          loadPath(loaded, true);
+        }
+      });
+    }, controller.signal).catch(() => {
+      // Stream ended/failed — the tree stays usable; next panel open or
+      // fileTreeVersion bump still refreshes it.
+    });
+    return () => controller.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, activeTab, projectId, token, baseUrl]);
+
   // Load root when projectId changes or explorer tab becomes active
   useEffect(() => {
     if (isOpen && activeTab === "explorer" && projectId) {
@@ -140,13 +176,14 @@ export const RightPanel: React.FC<RightPanelProps> = ({
     }
   }, [isOpen, activeTab, projectId]);
 
-  // Refresh file tree when fileTreeVersion bumps (external file mutations)
+  // Refresh file tree when fileTreeVersion bumps (external file mutations).
+  // Incremental: re-fetch every already-loaded directory and KEEP the user's
+  // expansion state (the old full reset collapsed the tree on every write).
   useEffect(() => {
     if (fileTreeVersion > 0 && isOpen && activeTab === "explorer" && projectId) {
-      setFileTree({});
-      setExpandedFolders({});
-      loadPath(".");
+      Object.keys(fileTreeRef.current).forEach((p) => loadPath(p, true));
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fileTreeVersion]);
 
   const toggleFolder = async (path: string) => {
@@ -247,17 +284,20 @@ export const RightPanel: React.FC<RightPanelProps> = ({
   };
 
   return (
-    <AnimatePresence initial={false}>
+    // 根节点始终挂载:开合(width 0 ↔ var(--right-w))交 CSS transition;
+    // 宽度消费 App 分栏容器上的 --right-w,拖动分割条时 App 直写该变量,
+    // 面板实时跟随且不触发 React 重渲染(resizing 时关掉过渡避免拖尾)
+    <div
+      style={{
+        width: isOpen ? `var(--right-w, ${width}px)` : "0px",
+        transition: resizing ? "none" : "width 0.28s cubic-bezier(0.2, 0, 0, 1)",
+      }}
+      className="bg-white dark:bg-[#171717] flex flex-col h-full font-sans select-none shrink-0 z-20 shadow-xs overflow-hidden"
+    >
       {isOpen && (
-        <motion.div
-          initial={{ width: 0, opacity: 0 }}
-          animate={{ width: `${width}px`, opacity: 1 }}
-          exit={{ width: 0, opacity: 0 }}
-          transition={{ duration: 0.28, ease: [0.2, 0, 0, 1] }}
-          className="bg-white dark:bg-[#171717] flex flex-col h-full font-sans select-none shrink-0 z-20 shadow-xs overflow-hidden"
-        >
+        <>
           {/* Inner container constrained to target width so content doesn't wrap awkwardly while expanding */}
-          <div style={{ width: `${width}px` }} className="flex flex-col h-full">
+          <div style={{ width: `var(--right-w, ${width}px)` }} className="flex flex-col h-full">
             {/* Top Icon Tabs */}
             <div className="h-8 bg-[#f3f3f5] dark:bg-[#0b0b0b] border-b border-gray-200/90 dark:border-[#2a2a2a] flex items-stretch justify-between shrink-0 font-sans">
               <div className="flex items-stretch">
@@ -310,8 +350,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({
                   }`}
                   title={t("CodeEngine 内置浏览器", "Built-in Browser")}
                 >
-                  <Globe className="w-3.5 h-3.5 text-blue-500 dark:text-[#3b82f6] shrink-0" />
-                  <span className="text-[11px] font-sans">{t("浏览器", "Browser")}</span>
+                  <Globe className="w-3.5 h-3.5 text-gray-500 dark:text-zinc-400 shrink-0" />
                 </button>
               </div>
 
@@ -543,9 +582,9 @@ export const RightPanel: React.FC<RightPanelProps> = ({
           </div>
         )}
       </div>
-          </div>
-        </motion.div>
+        </div>
+        </>
       )}
-    </AnimatePresence>
+    </div>
   );
 };

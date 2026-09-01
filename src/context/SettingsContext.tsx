@@ -24,6 +24,7 @@ export interface BackendModelItem {
   provider?: string;
   protocol?: string;
   baseUrl?: string;
+  apiKey?: string;
   isSystem?: boolean;
   hasLink?: boolean;
   hasImage?: boolean;
@@ -421,8 +422,8 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             : (model.base_url || model.baseUrl || model.url || "");
 
           const apiKeyStr = typeof model === "object"
-            ? (model.api_key || model.apiKey || "••••••••")
-            : "••••••••";
+            ? (model.api_key || model.apiKey || "")
+            : "";
 
           nextBackendModels.push({
             id: idStr,
@@ -433,6 +434,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             provider: String(providerStr),
             protocol: String(protocolStr),
             baseUrl: String(baseUrlStr),
+            apiKey: isSystem ? "" : String(apiKeyStr),
             isSystem,
             hasLink: true,
             hasImage: idStr.includes("v") || modelCodeStr.includes("v") || idStr.includes("vision") || idStr.includes("kimi"),
@@ -652,6 +654,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         provider: p.name,
         protocol: p.protocol,
         baseUrl: p.baseUrl,
+        apiKey: p.apiKey,
         isSystem: false,
         hasLink: true,
         hasImage: false,
@@ -717,6 +720,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               provider: p.name,
               protocol: p.protocol,
               baseUrl: p.baseUrl,
+              apiKey: p.apiKey,
             }
           : m
       )
@@ -966,3 +970,4 @@ export const useSettings = () => {
   }
   return context;
 };
+

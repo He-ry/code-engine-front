@@ -152,6 +152,27 @@ export async function readFile(
   return unwrap<FileReadResponse>(await res.json());
 }
 
+/**
+ * Raw bytes of a workspace Office file (code-engine-office 预览消费).
+ * Throws on non-2xx. */
+export async function downloadProjectFileBytes(
+  baseUrl: string,
+  token: string,
+  projectId: string,
+  path: string
+): Promise<ArrayBuffer> {
+  const params = new URLSearchParams({ path });
+  const res = await apiFetch(
+    `${baseUrl}/api/projects/${encodeURIComponent(projectId)}/files/download?${params}`,
+    // ⚠️ 工作区文件随时被 agent/编辑器回写,必须绕过 HTTP 缓存——
+    //    后端 FileResponse 只带 ETag/Last-Modified 时,浏览器启发式
+    //    缓存会在新鲜期内直接吐旧字节("预览文档是旧的"的根源)。
+    { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" }
+  );
+  if (!res.ok) throw new Error(await detail(res));
+  return res.arrayBuffer();
+}
+
 /** OfficeCLI-rendered HTML for a project workspace Office file. html is
  *  null when OfficeCLI is unavailable or conversion failed — callers should
  *  then fall back to readFile. */
@@ -169,24 +190,6 @@ export async function previewProjectFile(
   if (!res.ok) throw new Error(await detail(res));
   const d = unwrap<{ filename?: string; html?: string | null }>(await res.json());
   return { filename: d.filename ?? "", html: d.html ?? null };
-}
-
-/** OnlyOffice editor config for a project workspace file (interactive edit
- *  with save-back). enabled=false → caller falls back to previewProjectFile. */
-export async function getOnlyOfficeProjectConfig(
-  baseUrl: string,
-  token: string,
-  projectId: string,
-  path: string,
-  mode: "edit" | "view" = "edit",
-): Promise<{ enabled: boolean; documentType?: string; config?: Record<string, unknown> }> {
-  const params = new URLSearchParams({ project_id: projectId, path, mode });
-  const res = await apiFetch(`${baseUrl}/api/onlyoffice/editor-config?${params}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!res.ok) throw new Error(await detail(res));
-  const json = await res.json();
-  return json?.data ?? { enabled: false };
 }
 
 export async function getFileTree(
@@ -291,4 +294,46 @@ export async function getPreviewUrl(
  */
 export function siteUrl(baseUrl: string, projectId: string, path: string = ""): string {
   return `${baseUrl}/api/projects/${encodeURIComponent(projectId)}/site/${path}`;
+}
+
+/**
+ * Subscribe to workspace filesystem change events (SSE, watchdog-backed).
+ * Mainstream-editor file-tree architecture: content stays lazily pulled via
+ * /files/list; this stream tells the client WHICH directories to re-pull.
+ * Calls onEvent with the affected workspace-relative dirs ("." = root).
+ * Resolves when the stream closes; rejects on fetch error.
+ */
+export async function streamFsEvents(
+  baseUrl: string,
+  token: string,
+  projectId: string,
+  onEvent: (paths: string[]) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  const { parseSseBlock } = await import("./agentClient");
+  const res = await fetch(
+    `${baseUrl}/api/projects/${encodeURIComponent(projectId)}/fs/events`,
+    { headers: { Authorization: `Bearer ${token}` }, signal }
+  );
+  if (!res.ok || !res.body) {
+    throw new Error(await detail(res));
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let sepIndex: number;
+    while ((sepIndex = buffer.indexOf("\n\n")) >= 0) {
+      const block = buffer.slice(0, sepIndex);
+      buffer = buffer.slice(sepIndex + 2);
+      const event = parseSseBlock(block);
+      if (event?.type === "fs_changed" && Array.isArray(event.data?.paths)) {
+        onEvent(event.data.paths as string[]);
+      }
+    }
+  }
 }

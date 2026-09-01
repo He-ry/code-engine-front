@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { useSettings } from "../context/SettingsContext";
 import { useToast } from "../context/ToastContext";
@@ -10,6 +10,17 @@ import {
   testSearchSettings,
   SearchBackendKind,
 } from "../lib/searchSettingsApi";
+import {
+  listMemoryEntries,
+  listMemoryThreads,
+  deleteMemoryEntry,
+  clearMemoryScope,
+  type MemoryEntry,
+  type MemoryScope,
+  type MemoryThreadSummary,
+} from "../lib/memoryApi";
+import { listProjects } from "../lib/projectApi";
+import { fetchUsageSummary, type UsageSummary } from "../lib/usageApi";
 import {
   Settings,
   Bot,
@@ -28,7 +39,6 @@ import {
   RotateCcw,
   Sliders,
   Cpu,
-  Key,
   ShieldAlert,
   User,
   PieChart,
@@ -53,7 +63,6 @@ import {
   Code2,
   Grid,
   Trash2,
-  Copy,
   Eye,
   EyeOff,
   Plus,
@@ -409,6 +418,103 @@ const SUBAGENTS_DATA = [
   },
 ];
 
+// Memory entry category badges (memory_entries.category from the backend pipeline)
+const MEM_CATEGORY_STYLES: Record<string, { zh: string; en: string; cls: string }> = {
+  preference: {
+    zh: "偏好",
+    en: "Preference",
+    cls: "bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300",
+  },
+  decision: {
+    zh: "决策",
+    en: "Decision",
+    cls: "bg-purple-50 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300",
+  },
+  project_context: {
+    zh: "项目上下文",
+    en: "Context",
+    cls: "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300",
+  },
+  fact: {
+    zh: "事实",
+    en: "Fact",
+    cls: "bg-gray-100 dark:bg-zinc-800 text-gray-600 dark:text-zinc-300",
+  },
+};
+
+// Lightweight custom dropdown for the memory pickers — native <select>
+// popups don't follow the dark theme and look out of place.
+const MemSelect: React.FC<{
+  value: string;
+  onChange: (v: string) => void;
+  options: { value: string; label: string }[];
+  placeholder?: string;
+}> = ({ value, onChange, options, placeholder = "" }) => {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+
+  const current = options.find((o) => o.value === value);
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center justify-between gap-2 px-2.5 py-2 border border-gray-200/90 dark:border-zinc-700 bg-white dark:bg-zinc-800 rounded-md text-xs text-gray-800 dark:text-zinc-200 shadow-2xs cursor-pointer hover:border-gray-300 dark:hover:border-zinc-600 transition-colors"
+      >
+        <span className="truncate">{current ? current.label : placeholder}</span>
+        <ChevronDown
+          className={`w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 shrink-0 transition-transform ${open ? "rotate-180" : ""}`}
+        />
+      </button>
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            initial={{ opacity: 0, y: -4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.12 }}
+            className="absolute left-0 right-0 top-full mt-1 z-50 max-h-[240px] overflow-y-auto rounded-md border border-gray-200/90 dark:border-zinc-700 bg-white dark:bg-zinc-800 shadow-lg"
+          >
+            {options.length === 0 && (
+              <div className="px-2.5 py-2 text-xs text-gray-400 dark:text-zinc-500">{placeholder}</div>
+            )}
+            {options.map((o) => (
+              <button
+                key={o.value}
+                type="button"
+                onClick={() => {
+                  onChange(o.value);
+                  setOpen(false);
+                }}
+                className={`w-full text-left px-2.5 py-2 text-xs flex items-center justify-between gap-2 cursor-pointer transition-colors ${
+                  o.value === value
+                    ? "bg-gray-100 dark:bg-zinc-700/60 text-gray-900 dark:text-zinc-100"
+                    : "text-gray-700 dark:text-zinc-300 hover:bg-gray-50 dark:hover:bg-zinc-700/40"
+                }`}
+              >
+                <span className="truncate">{o.label}</span>
+                {o.value === value && (
+                  <Check className="w-3.5 h-3.5 shrink-0 text-gray-500 dark:text-zinc-400" />
+                )}
+              </button>
+            ))}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+};
+
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
   onClose,
@@ -476,12 +582,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [isLangOpen, setIsLangOpen] = useState(false);
   const [isThinkingOpen, setIsThinkingOpen] = useState(false);
 
-  // Account token state
-  const [showToken, setShowToken] = useState(false);
-  const [showRefreshToken, setShowRefreshToken] = useState(false);
-
   // Account usage chart view mode
-  const [usageViewMode, setUsageViewMode] = useState<"day" | "month">("day");
+  const [usageSummary, setUsageSummary] = useState<UsageSummary | null>(null);
+  const [usageLoading, setUsageLoading] = useState(false);
+  const [usageError, setUsageError] = useState("");
 
   // Extensions (能力扩展) state
   const [extensionSubTab, setExtensionSubTab] = useState<"market" | "installed">("market");
@@ -512,6 +616,34 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [wsBraveKey, setWsBraveKey] = useState("");
   const [wsBaseUrl, setWsBaseUrl] = useState("");
   const [wsShowKey, setWsShowKey] = useState(false);
+
+  // Memory settings (记忆) — real data from the backend two-phase memory pipeline
+  const [memScope, setMemScope] = useState<MemoryScope>("user");
+  const [memProjects, setMemProjects] = useState<{ id: string; name: string }[]>([]);
+  const [memProjectId, setMemProjectId] = useState("");
+  const [memThreads, setMemThreads] = useState<MemoryThreadSummary[]>([]);
+  const [memThreadId, setMemThreadId] = useState("");
+  const [memEntries, setMemEntries] = useState<MemoryEntry[]>([]);
+  const [memLoading, setMemLoading] = useState(false);
+  const [memError, setMemError] = useState("");
+  const [memDeletingId, setMemDeletingId] = useState<string | null>(null);
+  const [memClearArmed, setMemClearArmed] = useState(false);
+  // Which category groups are expanded in the dropdown-style memory list.
+  const [memOpenCats, setMemOpenCats] = useState<Record<string, boolean>>({});
+  // Group entries by category for the collapsible list; unknown categories
+  // fall back to "fact", matching MEM_CATEGORY_STYLES rendering.
+  const memGroups = useMemo(() => {
+    const byCat = new Map<string, MemoryEntry[]>();
+    for (const e of memEntries) {
+      const key = MEM_CATEGORY_STYLES[e.category] ? e.category : "fact";
+      const list = byCat.get(key);
+      if (list) list.push(e);
+      else byCat.set(key, [e]);
+    }
+    return (["preference", "decision", "project_context", "fact"] as const)
+      .filter((c) => (byCat.get(c) || []).length > 0)
+      .map((c) => ({ category: c as string, entries: byCat.get(c)! }));
+  }, [memEntries]);
   const [isWsBackendOpen, setIsWsBackendOpen] = useState(false);
   const [wsSaving, setWsSaving] = useState(false);
   const [wsTesting, setWsTesting] = useState(false);
@@ -692,8 +824,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   const handleTestModelItem = async (model: any) => {
     const modelId = model.id;
-    const cp = (customProviders || []).find((p) => p.modelName === model.id || p.id === model.id) ||
-               (backendModels || []).find((bm) => bm.id === model.id);
+    const cp = (backendModels || []).find((bm) => bm.id === model.id) ||
+               (customProviders || []).find((p) => p.modelName === model.id || p.id === model.id);
 
     const providerName = (cp && "provider" in cp ? (cp as any).provider : cp?.name) || model.provider || "System";
     const baseUrlVal = cp?.baseUrl || model.baseUrl || "https://api.openai.com/v1";
@@ -797,6 +929,133 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   };
 
+  // -- Memory settings: load picker data once per open -----------------------
+  const memBaseUrl = backendApiUrl || "https://agent.hery.cloud";
+  const memToken = user?.token || "";
+
+  useEffect(() => {
+    if (!isOpen || activeCategory !== "memory" || !memToken) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const [projects, threads] = await Promise.all([
+          listProjects(memBaseUrl, memToken),
+          listMemoryThreads(memBaseUrl, memToken),
+        ]);
+        if (cancelled) return;
+        setMemProjects(projects.map((p) => ({ id: p.id, name: p.name })));
+        setMemThreads(threads);
+        setMemProjectId((prev) => prev || projects[0]?.id || "");
+        setMemThreadId((prev) => prev || threads[0]?.thread_id || "");
+      } catch (err) {
+        if (!cancelled) setMemError(String((err as Error)?.message || err));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, activeCategory]);
+
+  // -- Account usage: load real stats when the account tab opens -------------
+  useEffect(() => {
+    if (!isOpen || activeCategory !== "account" || !memToken) return;
+    let cancelled = false;
+    setUsageLoading(true);
+    setUsageError("");
+    (async () => {
+      try {
+        const summary = await fetchUsageSummary(memBaseUrl, memToken, 366);
+        if (!cancelled) setUsageSummary(summary);
+      } catch (err) {
+        if (!cancelled) setUsageError(String((err as Error)?.message || err));
+      } finally {
+        if (!cancelled) setUsageLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, activeCategory]);
+
+  // Reload entries whenever scope / project / thread selection changes.
+  useEffect(() => {
+    if (!isOpen || activeCategory !== "memory" || !memToken) return;
+    if (memScope === "project" && !memProjectId) {
+      setMemEntries([]);
+      return;
+    }
+    if (memScope === "thread" && !memThreadId) {
+      setMemEntries([]);
+      return;
+    }
+    let cancelled = false;
+    setMemLoading(true);
+    setMemError("");
+    setMemClearArmed(false);
+    setMemOpenCats({});
+    (async () => {
+      try {
+        const entries = await listMemoryEntries(memBaseUrl, memToken, {
+          scope: memScope,
+          projectId: memScope === "project" ? memProjectId : undefined,
+          threadId: memScope === "thread" ? memThreadId : undefined,
+        });
+        if (!cancelled) setMemEntries(entries);
+      } catch (err) {
+        if (!cancelled) setMemError(String((err as Error)?.message || err));
+      } finally {
+        if (!cancelled) setMemLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, activeCategory, memScope, memProjectId, memThreadId]);
+
+  const handleDeleteMemoryEntry = async (entryId: string) => {
+    setMemDeletingId(entryId);
+    try {
+      await deleteMemoryEntry(memBaseUrl, memToken, entryId);
+      setMemEntries((prev) => prev.filter((e) => e.id !== entryId));
+      if (memScope === "thread") {
+        // Keep the thread picker counts in sync.
+        setMemThreads((prev) =>
+          prev
+            .map((tr) =>
+              tr.thread_id === memThreadId
+                ? { ...tr, entry_count: tr.entry_count - 1 }
+                : tr
+            )
+            .filter((tr) => tr.entry_count > 0)
+        );
+      }
+      showSuccess(t("记忆已删除", "Memory Deleted"));
+    } catch (err) {
+      showError(t("删除失败", "Delete Failed"), String((err as Error)?.message || err));
+    } finally {
+      setMemDeletingId(null);
+    }
+  };
+
+  const handleClearMemory = async () => {
+    try {
+      const removed = await clearMemoryScope(memBaseUrl, memToken, {
+        scope: memScope,
+        projectId: memScope === "project" ? memProjectId : undefined,
+        threadId: memScope === "thread" ? memThreadId : undefined,
+      });
+      setMemEntries([]);
+      if (memScope === "thread") {
+        setMemThreads((prev) => prev.filter((tr) => tr.thread_id !== memThreadId));
+      }
+      showSuccess(t("记忆已清空", "Memory Cleared"), t(`已删除 ${removed} 条记忆`, `${removed} entries removed`));
+    } catch (err) {
+      showError(t("清空失败", "Clear Failed"), String((err as Error)?.message || err));
+    } finally {
+      setMemClearArmed(false);
+    }
+  };
+
   const handleInstallToggle = async (skill: MarketSkill) => {
     const baseUrl = backendApiUrl || "https://agent.hery.cloud";
     const token = user?.token || "";
@@ -887,76 +1146,105 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     item.label.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
-  // Generate GitHub-style heatmap data (52 weeks x 7 days)
-  const generateHeatmapData = () => {
-    const months = ["8月", "9月", "10月", "11月", "12月", "1月", "2月", "3月", "4月", "5月", "6月", "7月"];
-    const weeks: Array<Array<{ level: number; date: string; tokens: string; requests: number }>> = [];
-    
-    let seed = 1234;
-    const pseudoRandom = () => {
-      seed = (seed * 9301 + 49297) % 233280;
-      return seed / 233280;
-    };
-
-    const startDate = new Date(2025, 7, 1);
-
-    for (let w = 0; w < 52; w++) {
-      const days = [];
-      for (let d = 0; d < 7; d++) {
-        const currentDate = new Date(startDate);
-        currentDate.setDate(startDate.getDate() + w * 7 + d);
-
-        const rand = pseudoRandom();
-        let level = 0;
-        let tokens = "0";
-        let requests = 0;
-
-        const isWeekend = d === 5 || d === 6;
-        const prob = isWeekend ? 0.35 : 0.75;
-
-        if (rand < prob) {
-          if (rand > 0.6) {
-            level = 4;
-            tokens = `${Math.floor(120 + pseudoRandom() * 80)}K`;
-            requests = Math.floor(40 + pseudoRandom() * 30);
-          } else if (rand > 0.4) {
-            level = 3;
-            tokens = `${Math.floor(60 + pseudoRandom() * 50)}K`;
-            requests = Math.floor(20 + pseudoRandom() * 20);
-          } else if (rand > 0.2) {
-            level = 2;
-            tokens = `${Math.floor(20 + pseudoRandom() * 35)}K`;
-            requests = Math.floor(8 + pseudoRandom() * 12);
-          } else {
-            level = 1;
-            tokens = `${Math.floor(2 + pseudoRandom() * 15)}K`;
-            requests = Math.floor(1 + pseudoRandom() * 7);
-          }
-        }
-
-        const dateStr = `${currentDate.getFullYear()}年${currentDate.getMonth() + 1}月${currentDate.getDate()}日`;
-        days.push({ level, date: dateStr, tokens, requests });
-      }
-      weeks.push(days);
-    }
-
-    return { months, weeks };
+  // Token number formatting: 1234 → "1.2K", 3400000 → "3.4M"
+  const formatTokens = (n: number): string => {
+    if (!isFinite(n) || n <= 0) return "0";
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}K`;
+    return String(n);
   };
 
-  const heatmapData = generateHeatmapData();
+  // GitHub-style heatmap over the usage summary: fixed 12-month window (52
+  // weeks), columns stretch to fill the card width, cells stay square.
+  const heatmapData = useMemo(() => {
+    const byDay = new Map<string, { tokens: number; requests: number }>();
+    for (const row of usageSummary?.days ?? []) {
+      const cur = byDay.get(row.day) ?? { tokens: 0, requests: 0 };
+      cur.tokens += row.input_tokens + row.output_tokens;
+      cur.requests += row.requests;
+      byDay.set(row.day, cur);
+    }
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const start = new Date(today);
+    const dowMon = (start.getDay() + 6) % 7; // Mon=0..Sun=6
+    start.setDate(start.getDate() - dowMon - 51 * 7); // this week's Monday, 52 weeks back
+
+    const fmtDay = (d: Date) =>
+      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+    const cells: Array<{ level: number; day: string; date: string; tokens: number; requests: number }> = [];
+    let maxTokens = 0;
+    for (let d = new Date(start); d <= today; d.setDate(d.getDate() + 1)) {
+      const key = fmtDay(d);
+      const agg = byDay.get(key);
+      const tokens = agg?.tokens ?? 0;
+      maxTokens = Math.max(maxTokens, tokens);
+      cells.push({
+        level: 0,
+        day: key,
+        date: `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`,
+        tokens,
+        requests: agg?.requests ?? 0,
+      });
+    }
+    // Quartile levels over non-zero days.
+    const q = maxTokens > 0 ? maxTokens / 4 : 0;
+    for (const c of cells) {
+      if (c.tokens <= 0) c.level = 0;
+      else if (q > 0 && c.tokens <= q) c.level = 1;
+      else if (q > 0 && c.tokens <= 2 * q) c.level = 2;
+      else if (q > 0 && c.tokens <= 3 * q) c.level = 3;
+      else c.level = 4;
+    }
+
+    // Split into week columns.
+    const weeks: Array<Array<(typeof cells)[number]>> = [];
+    for (let i = 0; i < cells.length; i += 7) weeks.push(cells.slice(i, i + 7));
+
+    // Month label per week boundary (drawn under the grid).
+    const months: Array<string | null> = weeks.map((w, i) => {
+      const first = w[0];
+      const prev = i > 0 ? weeks[i - 1][0] : null;
+      const label = `${first.day.slice(5, 7)}月`;
+      return prev && prev.day.slice(5, 7) === first.day.slice(5, 7) ? null : label;
+    });
+
+    return { months, weeks };
+  }, [usageSummary]);
+
+  // Last-30-days rollup sliced from the 182-day summary.
+  const usage30 = useMemo(() => {
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - 29);
+    const cut = `${cutoff.getFullYear()}-${String(cutoff.getMonth() + 1).padStart(2, "0")}-${String(cutoff.getDate()).padStart(2, "0")}`;
+    let input = 0;
+    let output = 0;
+    let requests = 0;
+    for (const r of usageSummary?.days ?? []) {
+      if (r.day >= cut) {
+        input += r.input_tokens;
+        output += r.output_tokens;
+        requests += r.requests;
+      }
+    }
+    return { input, output, requests, cutoff: cut, models: (usageSummary?.by_model ?? []).length };
+  }, [usageSummary]);
 
   const getHeatmapColor = (level: number) => {
     switch (level) {
       case 1:
-        return "bg-emerald-200 border-emerald-300/60 hover:bg-emerald-300";
+        return "bg-emerald-200 dark:bg-emerald-900/50 border-emerald-300/60 dark:border-emerald-800/60 hover:bg-emerald-300 dark:hover:bg-emerald-800";
       case 2:
-        return "bg-emerald-400 border-emerald-500/60 hover:bg-emerald-500";
+        return "bg-emerald-400 dark:bg-emerald-700 border-emerald-500/60 dark:border-emerald-600/60 hover:bg-emerald-500 dark:hover:bg-emerald-600";
       case 3:
-        return "bg-emerald-600 border-emerald-700/60 hover:bg-emerald-700";
+        return "bg-emerald-600 dark:bg-emerald-600 border-emerald-700/60 hover:bg-emerald-700";
       case 4:
-        return "bg-emerald-800 border-emerald-900/60 hover:bg-emerald-900";
+        return "bg-emerald-800 dark:bg-emerald-400 border-emerald-900/60 dark:border-emerald-300/60 hover:bg-emerald-900 dark:hover:bg-emerald-300";
       default:
-        return "bg-gray-100 border-gray-200/60 hover:bg-gray-200/80";
+        return "bg-gray-100 dark:bg-zinc-800 border-gray-200/60 dark:border-zinc-700/60 hover:bg-gray-200/80 dark:hover:bg-zinc-700";
     }
   };
 
@@ -1418,301 +1706,186 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     </div>
                   </div>
 
-                  {/* Authentication Tokens Section */}
-                  <div className="p-4 rounded-md border border-gray-200/90 dark:border-zinc-800 bg-[#f8f9fa] dark:bg-zinc-900/50 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <Key className="w-4 h-4 text-blue-600 dark:text-blue-400" />
-                        <span className="font-bold text-gray-900 dark:text-zinc-100">{t("当前登录 Token 凭证", "Current Login Token Credentials")}</span>
-                      </div>
-                      <span className="text-[11px] text-gray-400">{t("用于 API 身份验证", "Used for API Authentication")}</span>
+                  {/* Usage stats (real data from /api/usage/summary) */}
+                  {usageError ? (
+                    <div className="p-3.5 border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/20 rounded-md text-red-600 dark:text-red-400 text-[11px]">
+                      {usageError}
                     </div>
-
-                    <div className="space-y-2.5">
-                      {/* Access Token */}
-                      <div>
-                        <div className="flex items-center justify-between text-[11px] text-gray-500 dark:text-zinc-400 mb-1">
-                          <span>Access Token (Bearer Token)</span>
-                          {user?.token && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                navigator.clipboard.writeText(user.token || "");
-                                showSuccess(t("复制成功", "Copied Successfully"), t("Access Token 已复制到剪贴板", "Access Token copied to clipboard"));
-                              }}
-                              className="text-blue-600 dark:text-blue-400 hover:underline flex items-center gap-1 cursor-pointer font-medium"
-                            >
-                              <Copy className="w-3 h-3" />
-                              {t("复制 Token", "Copy Token")}
-                            </button>
-                          )}
-                        </div>
-                        <div className="relative flex items-center">
-                          <input
-                            type={showToken ? "text" : "password"}
-                            readOnly
-                            value={user?.token || t("未登录或无 Token", "Not logged in or no token")}
-                            className="w-full font-mono text-[11px] px-3 py-2 pr-9 bg-white dark:bg-zinc-800 border border-gray-200/80 dark:border-zinc-700/80 rounded-md text-gray-900 dark:text-zinc-100 select-all focus:outline-none"
-                          />
-                          {user?.token && (
-                            <button
-                              type="button"
-                              onClick={() => setShowToken(!showToken)}
-                              className="absolute right-2.5 text-gray-400 hover:text-gray-600 dark:hover:text-zinc-200 cursor-pointer"
-                              title={showToken ? t("隐藏", "Hide") : t("显示", "Show")}
-                            >
-                              {showToken ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                            </button>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* Refresh Token if available */}
-                      {user?.refreshToken && (
-                        <div>
-                          <div className="flex items-center justify-between text-[11px] text-gray-500 dark:text-zinc-400 mb-1">
-                            <span>Refresh Token</span>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                navigator.clipboard.writeText(user.refreshToken || "");
-                                showSuccess(t("复制成功", "Copied Successfully"), t("Refresh Token 已复制到剪贴板", "Refresh Token copied to clipboard"));
-                              }}
-                              className="text-blue-600 dark:text-blue-400 hover:underline flex items-center gap-1 cursor-pointer font-medium"
-                            >
-                              <Copy className="w-3 h-3" />
-                              {t("复制 Token", "Copy Token")}
-                            </button>
-                          </div>
-                          <div className="relative flex items-center">
-                            <input
-                              type={showRefreshToken ? "text" : "password"}
-                              readOnly
-                              value={user.refreshToken}
-                              className="w-full font-mono text-[11px] px-3 py-2 pr-9 bg-white dark:bg-zinc-800 border border-gray-200/80 dark:border-zinc-700/80 rounded-md text-gray-900 dark:text-zinc-100 select-all focus:outline-none"
-                            />
-                            <button
-                              type="button"
-                              onClick={() => setShowRefreshToken(!showRefreshToken)}
-                              className="absolute right-2.5 text-gray-400 hover:text-gray-600 dark:hover:text-zinc-200 cursor-pointer"
-                              title={showRefreshToken ? t("隐藏", "Hide") : t("显示", "Show")}
-                            >
-                              {showRefreshToken ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                            </button>
-                          </div>
-                        </div>
+                  ) : usageLoading ? (
+                    <div className="p-6 text-center text-gray-400 dark:text-zinc-500 text-[11px]">
+                      {t("加载中…", "Loading…")}
+                    </div>
+                  ) : !usageSummary || usageSummary.totals.requests === 0 ? (
+                    <div className="p-6 text-center text-gray-400 dark:text-zinc-500 text-[11px] border border-dashed border-gray-200 dark:border-zinc-800 rounded-md">
+                      {t(
+                        "暂无用量数据 — 开始对话后自动统计(历史对话无法回填)",
+                        "No usage data yet — stats accumulate as you chat (past chats cannot be backfilled)"
                       )}
                     </div>
-                  </div>
+                  ) : (
+                    <>
+                      {/* Last 30 Days Usage */}
+                      <div className="p-4 rounded-md border border-gray-200/90 dark:border-zinc-800 bg-[#f8f9fa] dark:bg-zinc-900/50 space-y-3">
+                        <div className="flex items-center justify-between text-xs">
+                          <div>
+                            <div className="font-bold text-gray-900 dark:text-zinc-100">{t("近 30 天用量", "Last 30 Days Usage")}</div>
+                            <div className="text-gray-500 dark:text-zinc-400 text-[11px] mt-0.5">
+                              {t(`统计周期:${usage30.cutoff} 至今`, `Period: ${usage30.cutoff} to today`)}
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <span className="font-mono font-bold text-base text-gray-900 dark:text-zinc-100">
+                              {formatTokens(usage30.input + usage30.output)}
+                            </span>
+                            <span className="text-gray-400 dark:text-zinc-500 text-xs font-mono"> tokens</span>
+                          </div>
+                        </div>
 
-                  {/* Monthly Quota Metric */}
-                  <div className="p-4 rounded-md border border-gray-200/90 dark:border-zinc-800 bg-[#f8f9fa] dark:bg-zinc-900/50 space-y-3">
-                    <div className="flex items-center justify-between text-xs">
-                      <div>
-                        <div className="font-bold text-gray-900 dark:text-zinc-100">{t("本月 Token 用量", "Monthly Token Usage")}</div>
-                        <div className="text-gray-500 dark:text-zinc-400 text-[11px] mt-0.5">
-                          {t("计费周期：2026-07-01 至 2026-08-01（距重置还有 2 天）", "Billing cycle: 2026-07-01 to 2026-08-01 (2 days to reset)")}
+                        {/* Input / output ratio bar */}
+                        {(() => {
+                          const total = usage30.input + usage30.output;
+                          const inPct = total > 0 ? Math.round((usage30.input / total) * 100) : 0;
+                          return (
+                            <>
+                              <div className="w-full bg-gray-200/80 dark:bg-zinc-800 h-2 rounded-full overflow-hidden flex">
+                                <div
+                                  className="bg-blue-500 dark:bg-blue-400 h-full transition-all duration-500"
+                                  style={{ width: `${inPct}%` }}
+                                />
+                                <div
+                                  className="bg-gray-900 dark:bg-zinc-200 h-full transition-all duration-500"
+                                  style={{ width: `${100 - inPct}%` }}
+                                />
+                              </div>
+                              <div className="flex gap-3 text-[10px] text-gray-500 dark:text-zinc-400 font-mono">
+                                <span className="flex items-center gap-1">
+                                  <span className="w-2 h-2 rounded-full bg-blue-500 dark:bg-blue-400 inline-block" />
+                                  {t("输入", "Input")} {inPct}%
+                                </span>
+                                <span className="flex items-center gap-1">
+                                  <span className="w-2 h-2 rounded-full bg-gray-900 dark:bg-zinc-200 inline-block" />
+                                  {t("输出", "Output")} {100 - inPct}%
+                                </span>
+                              </div>
+                            </>
+                          );
+                        })()}
+
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 pt-2 text-xs">
+                          <div className="p-2.5 rounded bg-white dark:bg-zinc-800/80 border border-gray-200/80 dark:border-zinc-700/60 shadow-2xs">
+                            <div className="text-gray-500 dark:text-zinc-400 text-[11px]">{t("输入 Tokens", "Input Tokens")}</div>
+                            <div className="font-mono font-semibold text-gray-900 dark:text-zinc-100 mt-0.5">{formatTokens(usage30.input)}</div>
+                          </div>
+                          <div className="p-2.5 rounded bg-white dark:bg-zinc-800/80 border border-gray-200/80 dark:border-zinc-700/60 shadow-2xs">
+                            <div className="text-gray-500 dark:text-zinc-400 text-[11px]">{t("输出 Tokens", "Output Tokens")}</div>
+                            <div className="font-mono font-semibold text-gray-900 dark:text-zinc-100 mt-0.5">{formatTokens(usage30.output)}</div>
+                          </div>
+                          <div className="p-2.5 rounded bg-white dark:bg-zinc-800/80 border border-gray-200/80 dark:border-zinc-700/60 shadow-2xs">
+                            <div className="text-gray-500 dark:text-zinc-400 text-[11px]">{t("请求数", "Requests")}</div>
+                            <div className="font-mono font-semibold text-gray-900 dark:text-zinc-100 mt-0.5">{t(`${usage30.requests} 次`, `${usage30.requests} reqs`)}</div>
+                          </div>
+                          <div className="p-2.5 rounded bg-white dark:bg-zinc-800/80 border border-gray-200/80 dark:border-zinc-700/60 shadow-2xs">
+                            <div className="text-gray-500 dark:text-zinc-400 text-[11px]">{t("活跃模型数", "Active Models")}</div>
+                            <div className="font-mono font-semibold text-gray-900 dark:text-zinc-100 mt-0.5">{usage30.models}</div>
+                          </div>
                         </div>
                       </div>
-                      <div className="text-right">
-                        <span className="font-mono font-bold text-base text-gray-900 dark:text-zinc-100">
-                          1,284,500
-                        </span>
-                        <span className="text-gray-400 dark:text-zinc-500 text-xs font-mono"> / 5,000,000</span>
-                      </div>
-                    </div>
 
-                    <div className="w-full bg-gray-200/80 dark:bg-zinc-800 h-2 rounded-full overflow-hidden">
-                      <div
-                        className="bg-gray-900 dark:bg-zinc-200 h-full rounded-full transition-all duration-500"
-                        style={{ width: "25.7%" }}
-                      />
-                    </div>
+                      {/* Usage Breakdown By Model Table */}
+                      <div className="p-4 rounded-md border border-gray-200/90 dark:border-zinc-800 bg-[#f8f9fa] dark:bg-zinc-900/50 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <h3 className="font-bold text-gray-900 dark:text-zinc-100 text-xs">{t("模型用量分布", "Usage Distribution by Model")}</h3>
+                          <span className="text-gray-400 text-[11px]">
+                            {t(`近 ${usageSummary.range.days} 天 · 按 Token 消耗倒序`, `Last ${usageSummary.range.days} days · by tokens`)}
+                          </span>
+                        </div>
 
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 pt-2 text-xs">
-                      <div className="p-2.5 rounded bg-white dark:bg-zinc-800/80 border border-gray-200/80 dark:border-zinc-700/60 shadow-2xs">
-                        <div className="text-gray-500 dark:text-zinc-400 text-[11px]">{t("已用额度", "Quota Used")}</div>
-                        <div className="font-mono font-semibold text-gray-900 dark:text-zinc-100 mt-0.5">25.7%</div>
+                        <div className="overflow-x-auto bg-white dark:bg-zinc-800/80 rounded p-3 border border-gray-200/80 dark:border-zinc-700/60">
+                          <table className="w-full text-left border-collapse text-xs">
+                            <thead>
+                              <tr className="border-b border-gray-200 dark:border-zinc-700 text-gray-500 dark:text-zinc-400 font-medium">
+                                <th className="py-2 px-1">{t("模型名称", "Model Name")}</th>
+                                <th className="py-2 px-1 text-right">Input Tokens</th>
+                                <th className="py-2 px-1 text-right">Output Tokens</th>
+                                <th className="py-2 px-1 text-right">{t("请求数", "Requests")}</th>
+                                <th className="py-2 px-1 text-right">{t("占比", "Ratio")}</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-100 dark:divide-zinc-700/60 font-mono text-[11px]">
+                              {usageSummary.by_model.map((m) => {
+                                const grand = usageSummary.totals.input_tokens + usageSummary.totals.output_tokens;
+                                const ratio = grand > 0 ? ((m.total_tokens / grand) * 100).toFixed(1) : "0";
+                                return (
+                                  <tr key={m.model}>
+                                    <td className="py-2.5 px-1 font-sans font-medium text-gray-900 dark:text-zinc-100">{m.model}</td>
+                                    <td className="py-2.5 px-1 text-right text-gray-600 dark:text-zinc-400">{m.input_tokens.toLocaleString()}</td>
+                                    <td className="py-2.5 px-1 text-right text-gray-600 dark:text-zinc-400">{m.output_tokens.toLocaleString()}</td>
+                                    <td className="py-2.5 px-1 text-right text-gray-600 dark:text-zinc-400">{m.requests.toLocaleString()}</td>
+                                    <td className="py-2.5 px-1 text-right font-semibold text-gray-900 dark:text-zinc-100">{ratio}%</td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
                       </div>
-                      <div className="p-2.5 rounded bg-white dark:bg-zinc-800/80 border border-gray-200/80 dark:border-zinc-700/60 shadow-2xs">
-                        <div className="text-gray-500 dark:text-zinc-400 text-[11px]">{t("本月请求数", "Monthly Reqs")}</div>
-                        <div className="font-mono font-semibold text-gray-900 dark:text-zinc-100 mt-0.5">{t("3,420 次", "3,420 reqs")}</div>
-                      </div>
-                      <div className="p-2.5 rounded bg-white dark:bg-zinc-800/80 border border-gray-200/80 dark:border-zinc-700/60 shadow-2xs">
-                        <div className="text-gray-500 dark:text-zinc-400 text-[11px]">{t("平均响应速度", "Avg Response")}</div>
-                        <div className="font-mono font-semibold text-gray-900 dark:text-zinc-100 mt-0.5">{t("1.2 秒", "1.2 sec")}</div>
-                      </div>
-                      <div className="p-2.5 rounded bg-white dark:bg-zinc-800/80 border border-gray-200/80 dark:border-zinc-700/60 shadow-2xs">
-                        <div className="text-gray-500 dark:text-zinc-400 text-[11px]">{t("并发限制", "Concurrency Limit")}</div>
-                        <div className="font-mono font-semibold text-gray-900 dark:text-zinc-100 mt-0.5">10 QPS</div>
-                      </div>
-                    </div>
-                  </div>
+                    </>
+                  )}
 
-                  {/* Usage Breakdown By Model Table */}
+                  {/* 26-Week Usage Heatmap (GitHub style, real data) */}
+                  {usageSummary && usageSummary.totals.requests > 0 && (
                   <div className="p-4 rounded-md border border-gray-200/90 dark:border-zinc-800 bg-[#f8f9fa] dark:bg-zinc-900/50 space-y-3">
                     <div className="flex items-center justify-between">
-                      <h3 className="font-bold text-gray-900 dark:text-zinc-100 text-xs">{t("模型用量分布", "Usage Distribution by Model")}</h3>
-                      <span className="text-gray-400 text-[11px]">{t("按 Token 消耗倒序", "Sorted by Token consumption")}</span>
+                      <h3 className="font-bold text-gray-900 dark:text-zinc-100 text-xs">
+                        {t("最近 12 个月使用分布", "Last 12 Months Heatmap")}
+                      </h3>
+                      <span className="text-gray-400 text-[11px]">
+                        {t("颜色越深用量越大（输入+输出）", "Darker = more usage (in+out)")}
+                      </span>
                     </div>
-
-                    <div className="overflow-x-auto bg-white dark:bg-zinc-800/80 rounded p-3 border border-gray-200/80 dark:border-zinc-700/60">
-                      <table className="w-full text-left border-collapse text-xs">
-                        <thead>
-                          <tr className="border-b border-gray-200 dark:border-zinc-700 text-gray-500 dark:text-zinc-400 font-medium">
-                            <th className="py-2 px-1">{t("模型名称", "Model Name")}</th>
-                            <th className="py-2 px-1 text-right">Input Tokens</th>
-                            <th className="py-2 px-1 text-right">Output Tokens</th>
-                            <th className="py-2 px-1 text-right">{t("请求数", "Requests")}</th>
-                            <th className="py-2 px-1 text-right">{t("占比", "Ratio")}</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-gray-100 dark:divide-zinc-700/60 font-mono text-[11px]">
-                          {(() => {
-                            const modelsToDisplay = (backendModels && backendModels.length > 0)
-                              ? backendModels.map(m => m.id || m.name)
-                              : ["glm-4-7", "glm-5-turbo", "deepseek-v4-pro"];
-
-                            const usageStats = [
-                              { inputTokens: "620,100", outputTokens: "200,000", reqs: "2,150", ratio: "63.8%" },
-                              { inputTokens: "210,400", outputTokens: "102,000", reqs: "840", ratio: "24.3%" },
-                              { inputTokens: "110,000", outputTokens: "42,000", reqs: "430", ratio: "11.9%" },
-                            ];
-
-                            return modelsToDisplay.slice(0, 3).map((mId, idx) => {
-                              const stat = usageStats[idx] || usageStats[0];
-                              return (
-                                <tr key={mId}>
-                                  <td className="py-2.5 px-1 font-sans font-medium text-gray-900 dark:text-zinc-100">
-                                    {mId}
-                                  </td>
-                                  <td className="py-2.5 px-1 text-right text-gray-600 dark:text-zinc-400">{stat.inputTokens}</td>
-                                  <td className="py-2.5 px-1 text-right text-gray-600 dark:text-zinc-400">{stat.outputTokens}</td>
-                                  <td className="py-2.5 px-1 text-right text-gray-600 dark:text-zinc-400">{stat.reqs}</td>
-                                  <td className="py-2.5 px-1 text-right font-semibold text-gray-900 dark:text-zinc-100">
-                                    {stat.ratio}
-                                  </td>
-                                </tr>
-                              );
-                            });
-                          })()}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-
-                  {/* Clean Activity Bar Chart with Day / Month Toggle */}
-                  <div className="p-4 rounded-md border border-gray-200/90 dark:border-zinc-800 bg-[#f8f9fa] dark:bg-zinc-900/50 space-y-3">
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                      <div className="flex items-center gap-3">
-                        <h3 className="font-bold text-gray-900 dark:text-zinc-100 text-xs">
-                          {usageViewMode === "day"
-                            ? "近 30 天每日用量（ Tokens ）"
-                            : "近 12 个月每月用量（ Tokens ）"}
-                        </h3>
-                        <span className="text-gray-400 text-[11px] font-mono">
-                          {usageViewMode === "day" ? "平均 42.8K / 天" : "月均 1.05M Tokens"}
-                        </span>
-                      </div>
-
-                      {/* Day / Month Toggle Buttons */}
-                      <div className="flex items-center bg-gray-200/80 dark:bg-zinc-800 p-0.5 rounded-lg text-[11px] self-start sm:self-auto font-medium">
-                        <button
-                          type="button"
-                          onClick={() => setUsageViewMode("day")}
-                          className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${
-                            usageViewMode === "day"
-                              ? "bg-white dark:bg-zinc-700 text-gray-900 dark:text-zinc-100 font-semibold shadow-2xs"
-                              : "text-gray-500 dark:text-zinc-400 hover:text-gray-800 dark:hover:text-zinc-200"
-                          }`}
-                        >
-                          {t("按天", "Daily")}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setUsageViewMode("month")}
-                          className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${
-                            usageViewMode === "month"
-                              ? "bg-white dark:bg-zinc-700 text-gray-900 dark:text-zinc-100 font-semibold shadow-2xs"
-                              : "text-gray-500 dark:text-zinc-400 hover:text-gray-800 dark:hover:text-zinc-200"
-                          }`}
-                        >
-                          {t("按月", "Monthly")}
-                        </button>
-                      </div>
-                    </div>
-
-                    {usageViewMode === "day" ? (
-                      <>
-                        <div className="h-28 flex items-end justify-between gap-1 pt-4 pb-1 border-b border-gray-200 dark:border-zinc-800">
-                          {[
-                            35, 42, 60, 20, 15, 80, 95, 40, 50, 75, 30, 25, 85, 110, 65, 45, 30, 70, 90, 100, 55, 40, 20, 60,
-                            80, 120, 75, 50, 65, 85,
-                          ].map((val, i) => (
-                            <div key={i} className="flex-1 flex flex-col items-center gap-1 group relative h-full justify-end">
-                              <div
-                                className="w-full bg-gray-300 dark:bg-zinc-700 group-hover:bg-gray-900 dark:group-hover:bg-zinc-100 rounded-xs transition-colors"
-                                style={{ height: `${(val / 120) * 100}%` }}
-                              />
-                              <div className="opacity-0 group-hover:opacity-100 absolute -top-7 px-1.5 py-0.5 bg-gray-900 text-white dark:bg-zinc-100 dark:text-zinc-900 text-[10px] rounded font-mono pointer-events-none transition-opacity z-10 whitespace-nowrap">
-                                {val}K
-                              </div>
+                    <div className="pb-1">
+                      <div>
+                        <div className="flex gap-[2px]">
+                          {heatmapData.weeks.map((week, wi) => (
+                            <div key={wi} className="flex-1 flex flex-col gap-[2px]">
+                              {week.map((c) => (
+                                <div
+                                  key={c.day}
+                                  className={`w-full aspect-square rounded-[2px] border cursor-pointer transition-colors ${getHeatmapColor(c.level)}`}
+                                  onMouseEnter={() =>
+                                    setHoveredCell({
+                                      date: c.date,
+                                      tokens: formatTokens(c.tokens),
+                                      requests: c.requests,
+                                      level: c.level,
+                                    })
+                                  }
+                                  onMouseLeave={() => setHoveredCell(null)}
+                                />
+                              ))}
                             </div>
                           ))}
                         </div>
-
-                        <div className="flex justify-between text-[10px] text-gray-400 dark:text-zinc-500 font-mono">
-                          <span>{t("7月1日", "Jul 1")}</span>
-                          <span>{t("7月15日", "Jul 15")}</span>
-                          <span>{t("今天 (7月30日)", "Today (Jul 30)")}</span>
-                        </div>
-                      </>
-                    ) : (
-                      <>
-                        <div className="h-28 flex items-end justify-between gap-1.5 pt-4 pb-1 border-b border-gray-200 dark:border-zinc-800 px-1">
-                          {[
-                            { month: t("2025年8月", "Aug 2025"), label: "8", tokens: "620K", val: 620 },
-                            { month: t("2025年9月", "Sep 2025"), label: "9", tokens: "750K", val: 750 },
-                            { month: t("2025年10月", "Oct 2025"), label: "10", tokens: "890K", val: 890 },
-                            { month: t("2025年11月", "Nov 2025"), label: "11", tokens: "940K", val: 940 },
-                            { month: t("2025年12月", "Dec 2025"), label: "12", tokens: "1.05M", val: 1050 },
-                            { month: t("2026年1月", "Jan 2026"), label: "1", tokens: "1.12M", val: 1120 },
-                            { month: t("2026年2月", "Feb 2026"), label: "2", tokens: "820K", val: 820 },
-                            { month: t("2026年3月", "Mar 2026"), label: "3", tokens: "950K", val: 950 },
-                            { month: t("2026年4月", "Apr 2026"), label: "4", tokens: "1.10M", val: 1100 },
-                            { month: t("2026年5月", "May 2026"), label: "5", tokens: "1.45M", val: 1450 },
-                            { month: t("2026年6月", "Jun 2026"), label: "6", tokens: "1.30M", val: 1300 },
-                            { month: t("2026年7月", "Jul 2026"), label: "7", tokens: "1.28M", val: 1284 },
-                          ].map((item, i) => (
-                            <div key={i} className="flex-1 flex flex-col items-center gap-1 group relative h-full justify-end">
-                              <div
-                                className="w-full bg-gray-300 dark:bg-zinc-700 group-hover:bg-gray-900 dark:group-hover:bg-zinc-100 rounded-xs transition-colors"
-                                style={{ height: `${(item.val / 1500) * 100}%` }}
-                              />
-                              <div className="opacity-0 group-hover:opacity-100 absolute -top-8 px-2 py-0.5 bg-gray-900 text-white dark:bg-zinc-100 dark:text-zinc-900 text-[10px] rounded font-mono pointer-events-none transition-opacity z-10 whitespace-nowrap shadow-md">
-                                {item.month}: {item.tokens}
-                              </div>
+                        <div className="flex gap-[2px] mt-1">
+                          {heatmapData.months.map((m, i) => (
+                            <div key={i} className="flex-1 text-[8px] leading-none text-gray-400 dark:text-zinc-500 whitespace-nowrap">
+                              {m ?? ""}
                             </div>
                           ))}
                         </div>
+                      </div>
+                    </div>
 
-                        <div className="flex justify-between text-[10px] text-gray-500 dark:text-zinc-400 font-mono px-1">
-                          <span>{t("8月", "Aug")}</span>
-                          <span>{t("9月", "Sep")}</span>
-                          <span>{t("10月", "Oct")}</span>
-                          <span>{t("11月", "Nov")}</span>
-                          <span>{t("12月", "Dec")}</span>
-                          <span>{t("1月", "Jan")}</span>
-                          <span>{t("2月", "Feb")}</span>
-                          <span>{t("3月", "Mar")}</span>
-                          <span>{t("4月", "Apr")}</span>
-                          <span>{t("5月", "May")}</span>
-                          <span>{t("6月", "Jun")}</span>
-                          <span className="font-bold text-gray-900 dark:text-zinc-100">{t("7月", "Jul")}</span>
-                        </div>
-                      </>
-                    )}
+                    <div className="text-[10px] text-gray-500 dark:text-zinc-400 font-mono">
+                      {hoveredCell
+                        ? `${hoveredCell.date} · ${hoveredCell.tokens} tokens · ${t(`${hoveredCell.requests} 次`, `${hoveredCell.requests} reqs`)}`
+                        : t(
+                            `统计窗口:${formatTokens(usageSummary.totals.input_tokens + usageSummary.totals.output_tokens)} tokens · ${usageSummary.totals.requests} 次请求 · ${usageSummary.totals.active_days} 个活跃日`,
+                            `${formatTokens(usageSummary.totals.input_tokens + usageSummary.totals.output_tokens)} tokens · ${usageSummary.totals.requests} requests · ${usageSummary.totals.active_days} active days`,
+                          )}
+                    </div>
                   </div>
+                  )}
                 </div>
               )}
 
@@ -1950,25 +2123,183 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               {/* CATEGORY 3: 记忆 */}
               {activeCategory === "memory" && (
                 <div className="space-y-3 text-xs text-gray-700 dark:text-zinc-300">
+                  {/* 说明卡片 */}
                   <div className="p-4 bg-[#f8f9fa] dark:bg-zinc-900/60 rounded-md border border-gray-200/90 dark:border-zinc-800 space-y-2 shadow-2xs">
                     <div className="font-bold text-gray-900 dark:text-zinc-100 text-xs flex items-center gap-1.5">
                       <BookOpen className="w-3.5 h-3.5 text-gray-600 dark:text-zinc-400" />
-                      {t("项目上下文记忆", "Project Context Memory")}
+                      {t("Agent 记忆", "Agent Memory")}
                     </div>
                     <p className="text-gray-500 dark:text-zinc-400 leading-relaxed text-[11px]">
-                      {t("AI Studio 自动学习并保持项目架构约定、框架配置及组件编码风格，无需在每次对话中重复交代背景。", "AI Studio automatically learns and retains project architectural conventions, framework configurations, and component coding styles without repeating background context.")}
+                      {t(
+                        "每轮对话自动提取事实、决策与偏好，每 10 轮去重合并为长期记忆；按 用户 / 项目 / 会话 三层作用域注入后续对话。",
+                        "Facts, decisions and preferences are extracted from every turn, consolidated every 10 turns, and injected into later conversations across user / project / session scopes."
+                      )}
                     </p>
                   </div>
 
-                  <div className="p-3.5 bg-white dark:bg-zinc-900 border border-gray-200/90 dark:border-zinc-800 rounded-md flex justify-between items-center shadow-2xs">
-                    <span className="text-gray-600 dark:text-zinc-300 text-xs font-medium">{t("当前项目已积累 12,000 Token 记忆片段", "Current project has accumulated 12,000 Token memory fragments")}</span>
-                    <button
-                      onClick={() => showSuccess(t("历史记忆已清空", "Memory Cleared"), t("项目上下文记忆片段已重置", "Context memory fragments cleared"))}
-                      className="px-3 py-1.5 border border-red-200 dark:border-red-900/60 bg-white dark:bg-zinc-900 text-red-600 dark:text-red-400 rounded-md hover:bg-red-50 dark:hover:bg-red-950/30 text-xs transition-colors font-medium shadow-2xs cursor-pointer"
-                    >
-                      {t("清除历史记忆", "Clear Memory History")}
-                    </button>
+                  {/* Scope 切换 */}
+                  <div className="flex gap-1 p-1 bg-[#f8f9fa] dark:bg-zinc-900/60 border border-gray-200/90 dark:border-zinc-800 rounded-md shadow-2xs">
+                    {([
+                      { id: "user", label: t("用户偏好", "User") },
+                      { id: "project", label: t("项目记忆", "Project") },
+                      { id: "thread", label: t("会话记忆", "Session") },
+                    ] as { id: MemoryScope; label: string }[]).map((tab) => (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        onClick={() => setMemScope(tab.id)}
+                        className={`flex-1 py-1.5 px-2 rounded-md text-xs font-medium transition-all cursor-pointer ${
+                          memScope === tab.id
+                            ? "bg-white dark:bg-zinc-800 text-gray-900 dark:text-zinc-100 shadow-2xs border border-gray-200/80 dark:border-zinc-700"
+                            : "text-gray-500 dark:text-zinc-400 hover:text-gray-700 dark:hover:text-zinc-200"
+                        }`}
+                      >
+                        {tab.label}
+                        {memScope === tab.id && !memLoading && (
+                          <span className="ml-1.5 text-[10px] text-gray-400 dark:text-zinc-500">{memEntries.length}</span>
+                        )}
+                      </button>
+                    ))}
                   </div>
+
+                  {/* 项目 / 线程选择器 */}
+                  {memScope === "project" && (
+                    <MemSelect
+                      value={memProjectId}
+                      onChange={setMemProjectId}
+                      options={memProjects.map((p) => ({ value: p.id, label: p.name }))}
+                      placeholder={t("暂无项目", "No projects")}
+                    />
+                  )}
+                  {memScope === "thread" && (
+                    <MemSelect
+                      value={memThreadId}
+                      onChange={setMemThreadId}
+                      options={memThreads.map((tr) => {
+                        const name = tr.thread_name || tr.thread_id.slice(0, 8);
+                        const proj = tr.project_name || tr.project_id.slice(0, 8);
+                        return {
+                          value: tr.thread_id,
+                          label: proj ? `${name} · ${proj} (${tr.entry_count})` : `${name} (${tr.entry_count})`,
+                        };
+                      })}
+                      placeholder={t("暂无会话记忆", "No session memories")}
+                    />
+                  )}
+
+                  {/* 记忆条目列表 */}
+                  {memError ? (
+                    <div className="p-3.5 border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/20 rounded-md text-red-600 dark:text-red-400 text-[11px]">
+                      {memError}
+                    </div>
+                  ) : memLoading ? (
+                    <div className="p-6 text-center text-gray-400 dark:text-zinc-500 text-[11px]">
+                      {t("加载中…", "Loading…")}
+                    </div>
+                  ) : memEntries.length === 0 ? (
+                    <div className="p-6 text-center text-gray-400 dark:text-zinc-500 text-[11px] border border-dashed border-gray-200 dark:border-zinc-800 rounded-md">
+                      {t(
+                        "暂无记忆条目 — 随对话进行自动积累（每 10 轮合并一次）",
+                        "No memories yet — they accumulate as you chat (consolidated every 10 turns)"
+                      )}
+                    </div>
+                  ) : (
+                    <div className="space-y-2 max-h-[360px] overflow-y-auto">
+                      {memGroups.map((group) => {
+                        const cat = MEM_CATEGORY_STYLES[group.category] || MEM_CATEGORY_STYLES.fact;
+                        const open = !!memOpenCats[group.category];
+                        return (
+                          <div
+                            key={group.category}
+                            className="border border-gray-200/90 dark:border-zinc-800 rounded-md overflow-hidden bg-[#f8f9fa] dark:bg-zinc-900/60 shadow-2xs"
+                          >
+                            {/* 分组头 — 点击展开 / 收起 */}
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setMemOpenCats((prev) => ({ ...prev, [group.category]: !prev[group.category] }))
+                              }
+                              className="w-full p-2.5 flex items-center justify-between gap-2 hover:bg-white dark:hover:bg-zinc-850 transition-colors cursor-pointer"
+                            >
+                              <div className="flex items-center gap-2">
+                                <span className={`inline-flex px-2 py-1 rounded text-xs font-semibold ${cat.cls}`}>
+                                  {t(cat.zh, cat.en)}
+                                </span>
+                                <span className="text-[11px] text-gray-400 dark:text-zinc-500">
+                                  {t(`${group.entries.length} 条`, `${group.entries.length} item(s)`)}
+                                </span>
+                              </div>
+                              <ChevronDown
+                                className={`w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 transition-transform ${open ? "rotate-180" : ""}`}
+                              />
+                            </button>
+                            <AnimatePresence initial={false}>
+                              {open && (
+                                <motion.div
+                                  initial={{ height: 0, opacity: 0 }}
+                                  animate={{ height: "auto", opacity: 1 }}
+                                  exit={{ height: 0, opacity: 0 }}
+                                  transition={{ duration: 0.15 }}
+                                  className="overflow-hidden"
+                                >
+                                  <div className="divide-y divide-gray-100 dark:divide-zinc-800/80 border-t border-gray-100 dark:border-zinc-800/80">
+                                    {group.entries.map((entry) => (
+                                      <div
+                                        key={entry.id}
+                                        className="p-3 flex items-start justify-between gap-2 hover:bg-white dark:hover:bg-zinc-850 transition-colors"
+                                      >
+                                        <div className="min-w-0 flex-1">
+                                          <div className="text-gray-800 dark:text-zinc-200 leading-relaxed break-words">
+                                            {entry.content}
+                                          </div>
+                                          <div className="flex items-center gap-2 mt-1 text-[10px] text-gray-400 dark:text-zinc-500">
+                                            <span className="shrink-0">
+                                              {t(`提及 ${entry.source_count} 次`, `seen ${entry.source_count}×`)}
+                                            </span>
+                                            <span>{new Date(entry.updated_at).toLocaleString()}</span>
+                                          </div>
+                                        </div>
+                                        <button
+                                          type="button"
+                                          disabled={memDeletingId === entry.id}
+                                          onClick={() => handleDeleteMemoryEntry(entry.id)}
+                                          className="p-1.5 rounded-md border border-transparent text-gray-400 hover:text-red-500 hover:border-red-200 dark:hover:border-red-900/60 transition-all cursor-pointer shrink-0 disabled:opacity-40"
+                                          title={t("删除该条记忆", "Delete this memory")}
+                                        >
+                                          <Trash2 className="w-3.5 h-3.5" />
+                                        </button>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </motion.div>
+                              )}
+                            </AnimatePresence>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* 底部操作行 */}
+                  {!memLoading && !memError && memEntries.length > 0 && (
+                    <div className="p-3.5 bg-white dark:bg-zinc-900 border border-gray-200/90 dark:border-zinc-800 rounded-md flex justify-between items-center shadow-2xs">
+                      <span className="text-gray-600 dark:text-zinc-300 text-xs font-medium">
+                        {t(`当前范围共 ${memEntries.length} 条记忆`, `${memEntries.length} memories in this scope`)}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => (memClearArmed ? handleClearMemory() : setMemClearArmed(true))}
+                        onBlur={() => setMemClearArmed(false)}
+                        className={`px-3 py-1.5 border rounded-md text-xs transition-colors font-medium shadow-2xs cursor-pointer ${
+                          memClearArmed
+                            ? "border-red-500 bg-red-500 text-white"
+                            : "border-red-200 dark:border-red-900/60 bg-white dark:bg-zinc-900 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30"
+                        }`}
+                      >
+                        {memClearArmed ? t("确认清空？", "Confirm clear?") : t("清空该范围记忆", "Clear this scope")}
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -2145,12 +2476,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                                   <button
                                     type="button"
                                     onClick={() => {
-                                      const cp = (customProviders || []).find((p) => p.modelName === model.id || p.id === model.id) ||
-                                                 (backendModels || []).find((bm) => bm.id === model.id);
+                                      const cp = (backendModels || []).find((bm) => bm.id === model.id) ||
+                                                 (customProviders || []).find((p) => p.modelName === model.id || p.id === model.id);
                                       setEditingModelId(model.id);
                                       setCustomName(cp?.name || (cp && "provider" in cp ? (cp as any).provider : "") || model.provider || "");
                                       setCustomBaseUrl(cp?.baseUrl || model.baseUrl || "");
-                                      setCustomApiKey(cp && "apiKey" in cp && (cp as any).apiKey && (cp as any).apiKey !== "••••••••" ? (cp as any).apiKey : "");
+                                      setCustomApiKey(cp && "apiKey" in cp && (cp as any).apiKey && (cp as any).apiKey !== "••••••••" ? String((cp as any).apiKey) : "");
                                       setCustomModelId(cp?.modelName || model.id || "");
                                       setCustomProto((cp?.protocol || model.protocol || "openai") as any);
                                       setCustomError("");
@@ -2640,8 +2971,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <div className="space-y-1">
                   <label className="block text-[11px] font-medium text-gray-600 dark:text-zinc-400">API Key</label>
                   <input
-                    type="password"
-                    placeholder={editingModelId ? t("留空则使用已保存的密钥", "Leave empty to use saved key") : "sk-••••••••••••••••"}
+                    type="text"
+                    placeholder={editingModelId ? t("当前已显示明文 API Key", "Plaintext API Key is shown") : "sk-..."}
                     value={customApiKey}
                     onChange={(e) => setCustomApiKey(e.target.value)}
                     className="w-full bg-gray-50 dark:bg-zinc-800/80 border border-gray-200 dark:border-zinc-700 rounded-md px-2.5 py-1.5 text-xs text-gray-800 dark:text-zinc-100 placeholder-gray-400 dark:placeholder-zinc-500 focus:outline-none focus:border-gray-400 dark:focus:border-zinc-500 font-mono transition-all"
@@ -2751,3 +3082,4 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     </motion.div>
   );
 };
+

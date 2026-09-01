@@ -86,13 +86,9 @@ export interface OpenTab {
    *  blob: object URL fetched with auth (thread attachments; revoked on tab
    *  close). */
   pdfUrl?: string;
-  /** OnlyOffice DS editor config (from /api/onlyoffice/editor-config) — when
-   *  set, the tab renders the interactive OnlyOffice editor (edit + save-back).
-   *  Replacing the object (new `document.key`) remounts the editor. */
-  onlyofficeConfig?: {
-    documentType: string;
-    config: Record<string, unknown>;
-  };
+  /** Live officecli watch URL (office_live SSE event) — while set, the tab
+   *  renders the live watch view (agent edits stream in real time). */
+  livePreviewUrl?: string;
   pendingChange?: {
     toolCallId: string;
     originalContent: string | null; // null = new file
@@ -222,6 +218,8 @@ export interface TextBlock {
   /** Backend itemId (msg_{subId}_{loop}) — a new round opens a new block. */
   id: string;
   text: string;
+  /** Codex-style assistant message phase: progress commentary vs final answer. */
+  phase?: "commentary" | "final_answer";
 }
 
 export interface ToolBlock {
