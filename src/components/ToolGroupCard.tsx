@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { ChevronDown, ChevronRight, Loader2, Zap } from "lucide-react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import { ToolExecution } from "../types";
 import { useSettings } from "../context/SettingsContext";
 import { ToolInvocationCard } from "./ToolInvocationCard";
@@ -50,6 +50,41 @@ export const ToolGroupCard: React.FC<ToolGroupCardProps> = ({
 
   if (tools.length === 0) return null;
 
+  // Match Codex for the common case: a single tool call is shown as one
+  // disclosure row with its output panel, not wrapped inside an extra
+  // "Ran 1 operation" group button.
+  if (tools.length === 1) {
+    const tool = tools[0];
+    if (
+      isFileTool(tool) &&
+      tool.status === "running" &&
+      tool.contentDelta &&
+      isStreaming
+    ) {
+      return <FileStreamRow tool={tool} isStreaming={isStreaming} />;
+    }
+    if (isFileTool(tool)) {
+      return (
+        <FileChangeCard
+          tool={tool}
+          isStreaming={isStreaming}
+          onApprove={(toolId) => onApproval?.(true, toolId)}
+          onReject={(toolId) => onApproval?.(false, toolId)}
+          onOpenFile={onOpenFile}
+          onKeepFile={onKeepFile}
+          onRevertFile={onRevertFile}
+        />
+      );
+    }
+    return (
+      <ToolInvocationCard
+        tool={tool}
+        onExecute={(toolId) => onApproval?.(true, toolId)}
+        onReject={(toolId) => onApproval?.(false, toolId)}
+      />
+    );
+  }
+
   const hasPending = tools.some((tool) => tool.status === "pending");
   const activeFileTool = tools.find(
     (tool) =>
@@ -88,28 +123,19 @@ export const ToolGroupCard: React.FC<ToolGroupCardProps> = ({
         )}
 
         {runningTool ? (
-          <>
-            <Loader2 className="w-3.5 h-3.5 animate-spin text-gray-400 dark:text-zinc-500" />
-            <span className="font-sans text-xs tracking-tight">
-              {runningTool.name
-                ? t(`正在执行 ${runningTool.name}…`, `Running ${runningTool.name}...`)
-                : t("正在执行…", "Running...")}
-            </span>
-          </>
+          <span className="font-sans text-xs tracking-tight animate-pulse">
+            {runningTool.name
+              ? t(`正在执行 ${runningTool.name}…`, `Running ${runningTool.name}...`)
+              : t("正在执行…", "Running...")}
+          </span>
         ) : hasPending ? (
-          <>
-            <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0" />
-            <span className="font-sans text-xs tracking-tight text-amber-500 dark:text-amber-400">
-              {t("等待确认", "Awaiting approval")}
-            </span>
-          </>
+          <span className="font-sans text-xs tracking-tight text-amber-500 dark:text-amber-400">
+            {t("等待确认", "Awaiting approval")}
+          </span>
         ) : (
-          <>
-            <Zap className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500" />
-            <span className="font-sans text-xs tracking-tight">
-              {t(`执行了 ${tools.length} 个操作`, `Ran ${tools.length} operations`)}
-            </span>
-          </>
+          <span className="font-sans text-xs tracking-tight">
+            {t(`执行了 ${tools.length} 个操作`, `Ran ${tools.length} operations`)}
+          </span>
         )}
 
         <span className="text-[11px] opacity-80 font-mono">

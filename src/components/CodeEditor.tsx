@@ -398,14 +398,13 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   const isPreviewTab = !!activeTab?.readOnly;
   const effectiveReadOnly = isPreviewTab || isReadOnly;
 
-  // 非代码类标签(实时 Office 预览 / HTML 预览 / PDF / 图片 / 浏览器)不展示代码编辑工具,
+  // 非代码类标签(ONLYOFFICE 预览 / PDF / 图片 / 浏览器)不展示代码编辑工具,
   // 只保留 刷新 / 独立卡片预览 / 最大化(关闭走标签条上的 X)。
   const isRichTab =
     isImageFile ||
     isBrowserTab ||
     activeTab?.livePreviewUrl !== undefined ||
-    activeTab?.pdfUrl !== undefined ||
-    activeTab?.htmlContent !== undefined;
+    activeTab?.pdfUrl !== undefined;
 
   // ── highlight.js-based multi-language syntax highlighter ──
   // Highlights the entire file at once so multi-line tokens (comments,
@@ -1136,9 +1135,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
           <>
             {/* Primary Code Editor */}
             <div className="flex-1 flex min-h-0 relative overflow-hidden">
-              {/* Live officecli watch view (agent streaming edits, SSE). No
-                  sandbox attr — the watch page needs scripts + SSE. */
-              /* Office 编辑器改用下方覆盖层常驻,见「Office 编辑器标签层」 */}
+              {/* Office 编辑器改用下方覆盖层常驻,见「Office 编辑器标签层」 */}
               {/* Office 编辑器标签层:所有已打开的 office 标签保持挂载(覆盖层),
                   切换标签/切到代码页都只做显示隐藏 —— 条件渲染会卸载 iframe
                   导致 700MB 编辑器整页重载 */}
@@ -1164,16 +1161,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
                     ))}
                 </div>
               )}
-              {activeTab.livePreviewUrl ? null : activeTab.htmlContent !== undefined ? (
-                <div className="flex-1 min-h-0 bg-white dark:bg-zinc-900">
-                  <iframe
-                    srcDoc={activeTab.htmlContent}
-                    sandbox=""
-                    title={activeTab.name}
-                    className="w-full h-full border-0 block"
-                  />
-                </div>
-              ) : activeTab.pdfUrl !== undefined ? (
+              {activeTab.livePreviewUrl ? null : activeTab.pdfUrl !== undefined ? (
                 <div className="flex-1 min-h-0 bg-white dark:bg-zinc-900">
                   {/* Browser-native PDF viewer (Chrome/Edge/Firefox built-in).
                       No sandbox attr — the PDF viewer needs it removed. */}
@@ -1443,16 +1431,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
                         className="w-full h-full border-0 block"
                       />
                     </div>
-                  ) : (
-                    <div className="flex-1 h-full bg-white dark:bg-zinc-900">
-                      <iframe
-                        srcDoc={activeTab.htmlContent}
-                        sandbox=""
-                        title={activeTab.name}
-                        className="w-full h-full border-0 block"
-                      />
-                    </div>
-                  )}
+                  ) : null}
                 </div>
               ) : (
                 <>

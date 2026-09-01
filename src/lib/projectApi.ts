@@ -173,25 +173,6 @@ export async function downloadProjectFileBytes(
   return res.arrayBuffer();
 }
 
-/** OfficeCLI-rendered HTML for a project workspace Office file. html is
- *  null when OfficeCLI is unavailable or conversion failed — callers should
- *  then fall back to readFile. */
-export async function previewProjectFile(
-  baseUrl: string,
-  token: string,
-  projectId: string,
-  path: string,
-): Promise<{ filename: string; html: string | null }> {
-  const params = new URLSearchParams({ path });
-  const res = await apiFetch(
-    `${baseUrl}/api/projects/${encodeURIComponent(projectId)}/files/preview?${params}`,
-    { headers: { Authorization: `Bearer ${token}` } }
-  );
-  if (!res.ok) throw new Error(await detail(res));
-  const d = unwrap<{ filename?: string; html?: string | null }>(await res.json());
-  return { filename: d.filename ?? "", html: d.html ?? null };
-}
-
 export async function getFileTree(
   baseUrl: string,
   token: string,

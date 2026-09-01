@@ -105,71 +105,6 @@ export default function App() {
   const navigate = useNavigate();
 
   // 0. Handle OAuth callback (for both popup window and main window redirect)
-  // ── office 实况通道控制器:接收 code-engine-office 的 open-tab 指令 ──
-  // (agent 调 doc_open 时,文档服务把编辑器标签推到这里打开)
-  useEffect(() => {
-    if (!isLoggedIn) return;
-    let ws: WebSocket | null = null;
-    let attempts = 0;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    // office 服务地址:本机走 127.0.0.1:3200,远程经预览代理(同源 host:5190)/ofsvc
-    const _oh = window.location.hostname;
-    const _isLocal = _oh === "localhost" || _oh === "127.0.0.1" || _oh === "::1";
-    const base =
-      (window as any).__officeServiceUrlOverride ||
-      (_isLocal ? "http://127.0.0.1:3200" : `http://${_oh}:5190/ofsvc`);
-    const connect = () => {
-      try {
-        const qs = new URLSearchParams({ type: "front" });
-        if (activeProjectId) qs.set("projectId", activeProjectId);
-        const url = base.replace(/^http/, "ws") + "/bridge-ws?" + qs.toString();
-        ws = new WebSocket(url);
-        ws.onopen = () => { attempts = 0; };
-        ws.onmessage = (ev) => {
-          try {
-            const msg = JSON.parse(ev.data);
-            if (msg.type === "open-tab" && msg.editorUrl) {
-              const tabPath = `office:${msg.path || msg.name}`;
-              setOpenTabs((prev) => {
-                const next = prev.filter((t) => t.path !== tabPath && t.path !== msg.path);
-                return [
-                  ...next,
-                  { path: tabPath, name: msg.name || "文档", content: "", livePreviewUrl: base + msg.editorUrl, readOnly: true },
-                ];
-              });
-              setActiveTabPath(tabPath);
-            }
-            // 僵尸标签页自愈 / 页级内存回收:按 fileId 找到对应 office 标签。
-            // tab-stale = 会话失效(服务重启过),正常重开;
-            // tab-recycle = 编辑器页 sdkjs/x2t 双 wasm 堆棘轮超阈值自请回收,
-            //   强制重开(跳过"字节相同跳过重载"比对,整页重建清零堆)。
-            if (msg.type === "tab-stale" || msg.type === "tab-recycle") {
-              const force = msg.type === "tab-recycle";
-              void (async () => {
-                const { officeFileIdFromUrl } = await import("./lib/officePreview");
-                const victim = openTabsRef.current.find(
-                  (t) => t.livePreviewUrl && officeFileIdFromUrl(t.livePreviewUrl) === msg.fileId,
-                );
-                if (victim) {
-                  refreshOfficeTabsRef.current([victim.path.replace(/^office:/, "")], force);
-                }
-              })();
-            }
-          } catch { /* ignore */ }
-        };
-        ws.onclose = () => {
-          attempts += 1;
-          if (attempts <= 10) timer = setTimeout(connect, Math.min(attempts * 2000, 10000));
-        };
-      } catch { /* 服务未启动,静默重试 */ }
-    };
-    connect();
-    return () => {
-      if (timer) clearTimeout(timer);
-      ws?.close();
-    };
-  }, [isLoggedIn, activeProjectId]);
-
   useEffect(() => {
     if (location.pathname.startsWith("/auth/callback")) {
       const searchString = location.search || (location.hash.startsWith("#") ? "?" + location.hash.substring(1) : location.hash);
@@ -412,7 +347,8 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
   // Live task plan (from update_plan / plan_delta) shown above the input.
-  // Persists across turns until the next plan overwrites it.
+  // It is only a transient progress overlay for the active turn; clear it once
+  // generation stops so it does not keep floating above the prompt box.
   const [activePlan, setActivePlan] = useState<{ steps: PlanStep[]; explanation: string } | null>(null);
   const [resolvedThreadIds, setResolvedThreadIds] = useState<Set<string>>(new Set());
   const resolvedTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
@@ -893,8 +829,7 @@ export default function App() {
       return;
     }
 
-    // Office files render via the OfficeCLI HTML preview; raw content is
-    // the fallback when the renderer is unavailable.
+    // Office files render through the ONLYOFFICE MCP editor service.
     if (isOfficePreviewPath(file.path) && user?.token && activeProjectId) {
       const tabPath = file.path;
       setOpenTabs((prev) => [
@@ -904,7 +839,7 @@ export default function App() {
       setActiveTabPath(tabPath);
       (async () => {
         const baseUrl = backendApiUrl || "https://agent.hery.cloud";
-        // Office 文件唯一预览方式:code-engine-office 真编辑器(不回退 OfficeCLI)
+        // Office 文件唯一预览方式:code-engine-office-mcp 真编辑器。
         try {
           const { downloadProjectFileBytes } = await import("./lib/projectApi");
           const { openInOfficeService, officeEditorUrl } = await import("./lib/officePreview");
@@ -919,8 +854,8 @@ export default function App() {
               t.path === tabPath
                 ? { ...t, content: `// ❌ 文档预览失败: ${e?.message || e}
 //
-// Office 文件统一由 code-engine-office 服务预览。
-// 请确认服务已启动: cd code-engine-office && npm run dev (端口 3200)` }
+// Office 文件统一由 code-engine-office-mcp 服务预览。
+// 请确认服务已启动: cd code-engine-office-mcp && npm run dev (端口 39100)` }
                 : t
             )
           );
@@ -944,9 +879,7 @@ export default function App() {
     openTabsRef.current = openTabs;
   }, [openTabs]);
 
-  // Re-fetch the OfficeCLI HTML render for any open office tab whose
-  // workspace file just changed on disk (e.g. the agent edited the docx the
-  // user is viewing). Stale on failure — the user can reopen the tab.
+  // Refresh any open ONLYOFFICE tab whose workspace file just changed on disk.
   const refreshOfficePreviewTabs = (changedPaths: string[], force = false) => {
     if (changedPaths.length === 0) return;
     for (const path of changedPaths) {
@@ -984,7 +917,7 @@ export default function App() {
           sameBytes,
         } = await import("./lib/officePreview");
         const bytes = await downloadProjectFileBytes(baseUrl, token, activeProjectId, path);
-        // 编辑器自己的保存(doc_edit/自动保存)也会触发 file_change:
+        // 编辑器自己的保存/自动保存也会触发 file_change:
         // 编辑器内存字节 == 磁盘字节 → 是自我触发的变化,跳过重载
         // (否则每次落盘都重载编辑器 tab,打断正在编辑的会话)
         const fileId = officeFileIdFromUrl(liveTab.livePreviewUrl);
@@ -1000,33 +933,6 @@ export default function App() {
         );
       } catch { /* 刷新失败保持旧内容 */ }
       return;
-    }
-    const tab = openTabsRef.current.find(
-      (t) =>
-        t.htmlContent !== undefined &&
-        (t.path === path || t.path === `attachment:${path}`)
-    );
-    if (!tab) return;
-    try {
-      let html: string | null = null;
-      if (tab.path.startsWith("attachment:")) {
-        const wsPath = tab.path.slice("attachment:".length);
-        const tid = threadIdRef.current;
-        if (tid) {
-          const { previewAttachmentHtml } = await import("./lib/agentClient");
-          ({ html } = await previewAttachmentHtml(baseUrl, token, tid, wsPath));
-        }
-      } else if (activeProjectId) {
-        const { previewProjectFile } = await import("./lib/projectApi");
-        ({ html } = await previewProjectFile(baseUrl, token, activeProjectId, tab.path));
-      }
-      if (html) {
-        setOpenTabs((cur) =>
-          cur.map((t) => (t.path === tab.path ? { ...t, htmlContent: html } : t))
-        );
-      }
-    } catch {
-      // keep the stale render
     }
   };
 
@@ -1196,6 +1102,7 @@ export default function App() {
       );
     }
     markThreadResolved(threadId);
+    setActivePlan(null);
     setIsGenerating(false);
   };
 
@@ -1803,36 +1710,6 @@ export default function App() {
         );
         break;
       }
-      case "office_live": {
-        // office_edit streaming started: the backend holds the document in
-        // an officecli resident and serves a live watch page (SSE) — swap
-        // any open tab for that file to the live view (same-origin proxy).
-        const livePath = data.path || "";
-        const livePort = Number(data.port || 0);
-        if (!livePath || !livePort) break;
-        setOpenTabs((cur) =>
-          cur.map((t) =>
-            t.path === livePath || t.path === `attachment:${livePath}`
-              ? { ...t, livePreviewUrl: `/officecli-watch/${livePort}/` }
-              : t
-          )
-        );
-        break;
-      }
-      case "office_live_end": {
-        // Streamed window over (committed or rolled back) — back to the
-        // static HTML preview; the commit's fs event refreshes it.
-        const livePath = data.path || "";
-        if (!livePath) break;
-        setOpenTabs((cur) =>
-          cur.map((t) =>
-            t.path === livePath || t.path === `attachment:${livePath}`
-              ? { ...t, livePreviewUrl: undefined }
-              : t
-          )
-        );
-        break;
-      }
       case "plan_delta": {
         const explanation = data.explanation || "";
         const plan: Array<{ step: string; status: string }> = data.plan || [];
@@ -2054,6 +1931,7 @@ export default function App() {
       // Only tear down generation state if this stream is still the active
       // one — a newer stream (e.g. the next user message) may already own it.
       if (abortControllerRef.current === controller) {
+        setActivePlan(null);
         setIsGenerating(false);
         activeAiMsgIdRef.current = null;
       }
@@ -2142,11 +2020,7 @@ export default function App() {
 
     const tabPath = attachmentTabPath(att.workspacePath);
     const existing = openTabs.find((tab) => tab.path === tabPath);
-    if (
-      existing &&
-      (existing.htmlContent !== undefined ||
-        (existing.content && !existing.content.startsWith("// 正在解析")))
-    ) {
+    if (existing && (existing.livePreviewUrl || (existing.content && !existing.content.startsWith("// 正在解析")))) {
       setActiveTabPath(tabPath);
       return;
     }
@@ -2172,10 +2046,9 @@ export default function App() {
       }
     }
 
-    // Office documents (docx/xlsx/pptx) render via the OfficeCLI HTML
-    // preview; null html or any error falls back to the plain-text extract.
+    // Office documents (docx/xlsx/pptx) render through the ONLYOFFICE MCP editor service.
     if (isOfficePreviewPath(att.workspacePath)) {
-      // Office 附件唯一预览方式:code-engine-office 真编辑器(不回退 OfficeCLI)
+      // Office 附件唯一预览方式:code-engine-office-mcp 真编辑器。
       try {
         const { openInOfficeService, officeEditorUrl } = await import("./lib/officePreview");
         const dl = await apiFetch(
@@ -2194,8 +2067,8 @@ export default function App() {
         setOpenTabs((prev) => {
           const next = prev.filter((tab) => tab.path !== tabPath);
           return [...next, { path: tabPath, name: att.filename, content: `// ❌ 文档预览失败: ${e?.message || e}
-// Office 附件统一由 code-engine-office 服务预览。
-// 请确认服务已启动: cd code-engine-office && npm run dev (端口 3200)`, readOnly: true }];
+// Office 附件统一由 code-engine-office-mcp 服务预览。
+// 请确认服务已启动: cd code-engine-office-mcp && npm run dev (端口 39100)`, readOnly: true }];
         });
         setActiveTabPath(tabPath);
         return;
@@ -2395,6 +2268,7 @@ export default function App() {
       attachments: fileAttachments.length > 0 ? fileAttachments : undefined,
     };
     setMessages((prev) => [...prev, userMsg]);
+    setActivePlan(null);
     setIsGenerating(true);
     // Remove any prior resolved indicator while a new generation is active.
     setResolvedThreadIds((prev) => {
@@ -2512,6 +2386,7 @@ export default function App() {
       // one — handleAskUserSubmit aborts this stream and installs a newer
       // controller before this finally runs.
       if (abortControllerRef.current === controller) {
+        setActivePlan(null);
         setIsGenerating(false);
         activeAiMsgIdRef.current = null;
       }
@@ -2893,7 +2768,7 @@ export default function App() {
                         onRevertFile={handleRevertFile}
                         onOpenAttachment={handleOpenAttachment}
                       />
-                      {activePlan && (
+                      {isGenerating && activePlan && (
                         <PlanProgressCard plan={activePlan.steps} explanation={activePlan.explanation} />
                       )}
                       <div className="p-3 bg-[#ffffff]/90 dark:bg-zinc-950/90 backdrop-blur-xs">

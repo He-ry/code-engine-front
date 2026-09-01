@@ -78,16 +78,12 @@ export interface OpenTab {
   /** Preview-only tab (e.g. chat attachment extracted text) — always
    *  read-only and never written back to any workspace. */
   readOnly?: boolean;
-  /** Self-contained HTML (OfficeCLI render) — when set, the tab renders a
-   *  sandboxed iframe instead of the code editor. `content` stays unused. */
-  htmlContent?: string;
   /** PDF source URL — when set, the tab renders the browser's built-in PDF
    *  viewer in an iframe. Either a project static-site URL (direct) or a
    *  blob: object URL fetched with auth (thread attachments; revoked on tab
    *  close). */
   pdfUrl?: string;
-  /** Live officecli watch URL (office_live SSE event) — while set, the tab
-   *  renders the live watch view (agent edits stream in real time). */
+  /** ONLYOFFICE editor URL — while set, the tab renders the document editor. */
   livePreviewUrl?: string;
   pendingChange?: {
     toolCallId: string;

@@ -84,8 +84,7 @@ export async function extractAttachmentText(
   return { filename: d.filename ?? "", text: d.text ?? "" };
 }
 
-/** File extensions that get the OfficeCLI HTML preview treatment (chat
- *  attachments and file-tree clicks both route through this list). */
+/** File extensions that open through the ONLYOFFICE MCP editor service. */
 export const OFFICE_PREVIEW_EXTS = [".docx", ".xlsx", ".pptx"];
 
 /** True when the workspace path should prefer the HTML render over text. */
@@ -116,25 +115,6 @@ export async function downloadThreadFileUrl(
   if (!res.ok) throw new Error(await detail(res));
   const blob = await res.blob();
   return URL.createObjectURL(blob);
-}
-
-/** Rendered HTML preview for Office attachments (OfficeCLI). html is null
- *  when OfficeCLI is unavailable or conversion failed — callers should then
- *  fall back to extractAttachmentText. */
-export async function previewAttachmentHtml(
-  baseUrl: string,
-  token: string,
-  threadId: string,
-  workspacePath: string,
-): Promise<{ filename: string; html: string | null }> {
-  const res = await apiFetch(
-    `${baseUrl}/api/chat/threads/${encodeURIComponent(threadId)}/attachments/preview?path=${encodeURIComponent(workspacePath)}`,
-    { headers: { Authorization: `Bearer ${token}` } }
-  );
-  if (!res.ok) throw new Error(await detail(res));
-  const json = await res.json();
-  const d = json?.data ?? json;
-  return { filename: d.filename ?? "", html: d.html ?? null };
 }
 
 /** Download a raw workspace file (uploaded attachment or agent-generated

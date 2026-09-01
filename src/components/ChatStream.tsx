@@ -70,7 +70,8 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
   const [likedMessages, setLikedMessages] = useState<Record<string, "up" | "down" | null>>({});
   const [collapsedThoughts, setCollapsedThoughts] = useState<Record<string, boolean>>({});
   const [customInputTexts, setCustomInputTexts] = useState<Record<string, string>>({});
-  const [selectedOptions, setSelectedOptions] = useState<Record<string, string>>({});
+  const [selectedOptions, setSelectedOptions] = useState<Record<string, string>>({});
+  const [quietWaitingMessageId, setQuietWaitingMessageId] = useState<string | null>(null);
   const [submittedCards, setSubmittedCards] = useState<Record<string, Record<string, string>>>({
     // Legacy mock ask card (msg-6) — deriveLegacyBlocks gives it the id
     // `${msgId}-ask`.
@@ -116,6 +117,40 @@ export const ChatStream: React.FC<ChatStreamProps> = ({
       el.scrollTop = el.scrollHeight;
     }
   }, [messages, isGenerating]);
+  // If the agent has already streamed visible text and then pauses briefly
+  // before the next SSE item (usually a tool call or the next reasoning round),
+  // keep a subtle live status visible instead of leaving the UI looking idle.
+  useEffect(() => {
+    setQuietWaitingMessageId(null);
+    const lastMsg = messages[messages.length - 1];
+    if (
+      !isGenerating ||
+      Object.keys(pendingApprovals || {}).length > 0 ||
+      !lastMsg ||
+      lastMsg.sender !== "ai" ||
+      lastMsg.agentStatus === "completed" ||
+      !lastMsg.isStreaming
+    ) {
+      return;
+    }
+
+    const blocks = getBlocks(lastMsg);
+    if (blocks.length === 0 && !(lastMsg.text || "").trim()) return;
+    const lastBlock = blocks[blocks.length - 1];
+    const shouldShowAfterQuietPeriod =
+      !lastBlock ||
+      lastBlock.kind === "text" ||
+      (lastBlock.kind === "reasoning" && Boolean(lastBlock.endedAt)) ||
+      (lastBlock.kind === "tool" && lastBlock.tool.status !== "running" && lastBlock.tool.status !== "pending");
+
+    if (!shouldShowAfterQuietPeriod) return;
+
+    const msgId = lastMsg.id;
+    const timer = window.setTimeout(() => {
+      setQuietWaitingMessageId(msgId);
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [messages, isGenerating, pendingApprovals]);
 
   const copyToClipboard = async (text: string, id: string) => {
     try {

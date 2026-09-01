@@ -12,54 +12,6 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = parseInt(process.env.PORT || "3000", 10);
 
-// ── officecli live-watch 同源代理 ──────────────────────────────────────────
-// officecli watch 服务器只监听后端宿主的 127.0.0.1:<port>,浏览器经同源路径
-// /officecli-watch/<port>/... 访问(office_live SSE 事件里只带 port)。SSE 需要
-// 原样流式透传:不解析请求体、不压缩、WriteTimeout 放宽。
-const WATCH_PATH_RE = /^\/(\d{2,5})(\/.*)?$/;
-app.use("/officecli-watch", (req, res) => {
-  const m = WATCH_PATH_RE.exec(req.url || "");
-  if (!m) {
-    res.status(404).end();
-    return;
-  }
-  const port = Number(m[1]);
-  if (port < 1024 || port > 65535) {
-    res.status(400).end();
-    return;
-  }
-  const headers: http.IncomingHttpHeaders = { ...req.headers };
-  delete headers["connection"];
-  delete headers["keep-alive"];
-  delete headers["upgrade"];
-  delete headers["accept-encoding"]; // 防 SSE 压缩透传解不开
-  headers["host"] = `127.0.0.1:${port}`;
-  const up = http.request(
-    {
-      protocol: "http:",
-      hostname: "127.0.0.1",
-      port,
-      method: req.method,
-      path: m[2] || "/",
-      headers: headers as http.OutgoingHttpHeaders,
-    },
-    (ur) => {
-      const h = { ...ur.headers };
-      delete h["connection"];
-      delete h["transfer-encoding"];
-      res.writeHead(ur.statusCode || 502, h);
-      ur.pipe(res);
-    }
-  );
-  up.setTimeout(600_000, () => up.destroy()); // SSE 长连接
-  up.on("error", (e) => {
-    if (!res.headersSent) res.status(502).end(`watch proxy error: ${e.message}`);
-    else res.end();
-  });
-  req.pipe(up);
-  res.on("close", () => up.destroy());
-});
-
 app.use(express.json({ limit: "10mb" }));
 
 // Helper to sanitize API keys and ensure non-ASCII characters (like bullet placeholders •) don't crash HTTP header ByteString conversion
@@ -763,3 +715,4 @@ async function startServer() {
 }
 
 startServer();
+

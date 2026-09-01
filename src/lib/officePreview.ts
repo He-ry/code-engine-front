@@ -1,29 +1,38 @@
 /**
- * code-engine-office 预览集成
+ * code-engine-office-mcp 预览集成
  *
- * 把 Office 文件交给本地 ONLYOFFICE 自托管编辑器服务(code-engine-office)
+ * 把 Office 文件交给本地 ONLYOFFICE MCP/编辑器服务(code-engine-office-mcp)
  * 预览:下载原始字节 → POST /api/open → 返回编辑器 URL(livePreviewUrl 标签页)。
- * 服务不可用时抛错,调用方回退原 OfficeCLI HTML 预览。
+ * 服务不可用时抛错,调用方显示错误提示。
  */
 
 /**
- * code-engine-office 服务地址。
+ * code-engine-office-mcp 服务地址。
  * 优先级:localStorage["office_service_url"] 覆盖 > 自动推导。
- * - 本机(localhost/127.0.0.1)直接连宿主机 3200;
+ * - 本机(localhost/127.0.0.1)直接连宿主机 39100;
  * - 远程经已公网可达的预览代理(同源 host,端口 5190 的 /ofsvc 前缀)
  *   转发到宿主机 office 服务。否则浏览器里的 WebSocket / REST 会落到
- *   客户端自己的 127.0.0.1:3200 而失败。
+ *   客户端自己的 127.0.0.1:39100 而失败。
  */
 export function officeServiceUrl(): string {
   try {
     const v = localStorage.getItem("office_service_url");
-    if (v) return v.replace(/\/$/, "");
+    if (v) {
+      const normalized = v.replace(/\/$/, "");
+      // Migration from the removed legacy code-engine-office service.
+      if (/:(3200)(\/)?$/.test(normalized)) {
+        const migrated = normalized.replace(/:3200$/, ":39100");
+        localStorage.setItem("office_service_url", migrated);
+        return migrated;
+      }
+      return normalized;
+    }
   } catch {
     /* ignore */
   }
   const h = window.location.hostname;
   const isLocal = h === "localhost" || h === "127.0.0.1" || h === "::1";
-  if (isLocal) return "http://127.0.0.1:3200";
+  if (isLocal) return "http://127.0.0.1:39100";
   return `http://${h}:5190/ofsvc`;
 }
 
@@ -67,7 +76,10 @@ export async function openInOfficeService(
       if (tr.ok) {
         const j = await tr.json();
         const st = j?.data?.token || j?.token;
-        if (st) qs.set("st", st);
+        if (st) {
+          qs.set("st", st);
+          qs.set("saveBackUrl", `${opts.baseUrl.replace(/\/$/, "")}/api/office/save-back`);
+        }
       }
     } catch {
       /* 取不到令牌则仅预览(修改不落盘) */
